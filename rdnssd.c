@@ -57,7 +57,7 @@ static struct sockaddr_in6 sin6_allrouters = {
 };
 
 void		usage(void);
-void		warnmsg   (int priority, const char *func, const char *msg,...);
+void		msg   (int priority, const char *func, const char *msg,...);
 void		clear_rdnss_list(void);
 void		clear_dnssl_list(void);
 int		sockopen   (void);
@@ -77,7 +77,7 @@ usage(void)
 }
 
 void
-warnmsg(int priority, const char *func, const char *msg,...)
+msg(int priority, const char *func, const char *msg,...)
 {
 	va_list		ap;
 	char		buf       [BUFSIZ];
@@ -131,7 +131,7 @@ sockopen(void)
 	rcvcmsglen = CMSG_SPACE(sizeof(struct in6_pktinfo)) +
 		CMSG_SPACE(sizeof(int));
 	if (rcvcmsgbuf == NULL && (rcvcmsgbuf = malloc(rcvcmsglen)) == NULL) {
-		warnmsg(LOG_ERR, __func__,
+		msg(LOG_ERR, __func__,
 			"malloc for receive msghdr failed");
 		return (-1);
 	}
@@ -140,19 +140,19 @@ sockopen(void)
 	sin6_allrouters.sin6_len = sizeof(sin6_allrouters);
 	if (inet_pton(AF_INET6, ALLROUTER,
 		      &sin6_allrouters.sin6_addr.s6_addr) != 1) {
-		warnmsg(LOG_ERR, __func__, "inet_pton failed for %s",
+		msg(LOG_ERR, __func__, "inet_pton failed for %s",
 			ALLROUTER);
 		return (-1);
 	}
 	if ((rssock = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6)) < 0) {
-		warnmsg(LOG_ERR, __func__, "socket: %s", strerror(errno));
+		msg(LOG_ERR, __func__, "socket: %s", strerror(errno));
 		return (-1);
 	}
 	/* Return receiving interface */
 	on = 1;
 	if (setsockopt(rssock, IPPROTO_IPV6, IPV6_RECVPKTINFO, &on,
 		       sizeof(on)) < 0) {
-		warnmsg(LOG_ERR, __func__, "IPV6_RECVPKTINFO: %s",
+		msg(LOG_ERR, __func__, "IPV6_RECVPKTINFO: %s",
 			strerror(errno));
 		exit(1);
 	}
@@ -161,7 +161,7 @@ sockopen(void)
 	ICMP6_FILTER_SETPASS(ND_ROUTER_ADVERT, &filt);
 	if (setsockopt(rssock, IPPROTO_ICMPV6, ICMP6_FILTER, &filt,
 		       sizeof(filt)) == -1) {
-		warnmsg(LOG_ERR, __func__, "setsockopt(ICMP6_FILTER): %s",
+		msg(LOG_ERR, __func__, "setsockopt(ICMP6_FILTER): %s",
 			strerror(errno));
 		return (-1);
 	}
@@ -211,7 +211,7 @@ process_rdnss_opt(struct nd_opt_rdnss *rdnss, int cur_idx)
 	struct in6_addr *cur_addr_p;
 
 	ltime = (intptr_t) ntohl(rdnss->nd_opt_rdnss_lifetime);
-	warnmsg(LOG_INFO, __func__, "RDNSS Option (lifetime: %d, will expire: %d, 8-octet units: %u)",
+	msg(LOG_INFO, __func__, "RDNSS Option (lifetime: %d, will expire: %d, 8-octet units: %u)",
 		ltime, time(NULL) + ltime, rdnss->nd_opt_rdnss_len);
 
 
@@ -250,7 +250,7 @@ process_dnssl_opt(struct nd_opt_dnssl *dnssl, int cur_idx)
 
 
 	ltime = (intptr_t) ntohl(dnssl->nd_opt_dnssl_lifetime);
-	warnmsg(LOG_INFO, __func__, "DNSSL Option (lifetime: %d, will expire: %d, 8-octet units: %u)",
+	msg(LOG_INFO, __func__, "DNSSL Option (lifetime: %d, will expire: %d, 8-octet units: %u)",
 		ltime, time(NULL) + ltime, dnssl->nd_opt_dnssl_len);
 
 	if (dnssl_ltime > 0)
@@ -290,11 +290,11 @@ process_dnssl_opt(struct nd_opt_dnssl *dnssl, int cur_idx)
 				if (strlcat(domain, segment, sizeof(domain)) <= sizeof(domain)) {
 				} else {
 					skip = true;
-					warnmsg(LOG_ERR, __func__, "domain \"%s\" too long, skipping", domain);
+					msg(LOG_ERR, __func__, "domain \"%s\" too long, skipping", domain);
 				}
 			} else {
 				skip = true;
-				warnmsg(LOG_ERR, __func__, "label \"%s\" too long, skipping domain", label);
+				msg(LOG_ERR, __func__, "label \"%s\" too long, skipping domain", label);
 			}
 		}
 		/*
@@ -318,14 +318,14 @@ sock_input(void)
 	int		nchanges = 0;
 
 	if ((i = recvmsg(rssock, &rcvmhdr, 0)) < 0) {
-		warnmsg(LOG_ERR, __func__, "recvmsg: %s", strerror(errno));
+		msg(LOG_ERR, __func__, "recvmsg: %s", strerror(errno));
 		return 0;
 	}
 	clear_rdnss_list();
 	clear_dnssl_list();
 
 	ra = rcviov[0].iov_base;
-	warnmsg(LOG_INFO, __func__, "RA received at %lu (lifetime: %lu)",
+	msg(LOG_INFO, __func__, "RA received at %lu (lifetime: %lu)",
 		time(NULL), ntohs(ra->nd_ra_router_lifetime));
 
 	end = rcviov[0].iov_base + i;
@@ -340,7 +340,7 @@ sock_input(void)
 		case ND_OPT_MTU:
 		case ND_OPT_ROUTE_INFO:
 			//Recognized, but not relevant
-				break;
+			break;
 		case ND_OPT_RDNSS:
 			nchanges = process_rdnss_opt((struct nd_opt_rdnss *)opt, nchanges);
 			break;
@@ -348,7 +348,7 @@ sock_input(void)
 			nchanges = process_dnssl_opt((struct nd_opt_dnssl *)opt, nchanges);
 			break;
 		default:
-			warnmsg(LOG_WARNING, __func__, "unrecognized message: %d",
+			msg(LOG_WARNING, __func__, "unrecognized message: %d",
 				opt->nd_opt_type);
 		}
 		cur += (opt->nd_opt_len * 8);
@@ -363,7 +363,7 @@ sock_input(void)
 void
 rdnss_timer(intptr_t data)
 {
-	warnmsg(LOG_DEBUG, __func__, "RDNSS: expired: %u, count %d", time(NULL), data);
+	msg(LOG_DEBUG, __func__, "RDNSS: expired: %u, count %d", time(NULL), data);
 	rdnss_ltime = 0;
 	clear_rdnss_list();
 	write_resolv_conf();
@@ -372,7 +372,7 @@ rdnss_timer(intptr_t data)
 void
 dnssl_timer(intptr_t data)
 {
-	warnmsg(LOG_DEBUG, __func__, "DNSSL: expired: %u, count %d", time(NULL), data);
+	msg(LOG_DEBUG, __func__, "DNSSL: expired: %u, count %d", time(NULL), data);
 	dnssl_ltime = 0;
 	clear_dnssl_list();
 	write_resolv_conf();
@@ -418,10 +418,10 @@ main(int argc, char *argv[])
 	}
 
 	if (!fflag)
-		daemon(0, 1);
+		daemon(0, 0);
 	
 	if ((kq = kqueue()) == -1) {
-		warnmsg(LOG_ERR, __func__, "kqueue(): %s", strerror(errno));
+		msg(LOG_ERR, __func__, "kqueue(): %s", strerror(errno));
 		exit(EXIT_FAILURE);
 	}
 	
@@ -429,7 +429,7 @@ main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	warnmsg(LOG_NOTICE, __func__, "started %d", s);
+	msg(LOG_NOTICE, __func__, "started%s", dflag ? " (debug output" : "");
 	
 	EV_SET(&change[0], s, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0);
 	nchanges = 1;
@@ -437,12 +437,12 @@ main(int argc, char *argv[])
 		nev = kevent(kq, change, nchanges, event, COUNT_OF(event), NULL);
 		nchanges = 0;
 		if (nev < 0) {
-			warnmsg(LOG_ERR, __func__, "kevent: %s", strerror(errno));
+			msg(LOG_ERR, __func__, "kevent: %s", strerror(errno));
 			exit(EXIT_FAILURE);
 		} else {
 			for (i = 0; i < nev; i++) {
 				if (event[i].flags & EV_ERROR) {
-					warnmsg(LOG_ERR, "EV_ERROR: %s for %lu\n",
+					msg(LOG_ERR, "EV_ERROR: %s for %lu\n",
 						strerror(event[i].data), event[i].ident);
 					exit(EXIT_FAILURE);
 				} else {
