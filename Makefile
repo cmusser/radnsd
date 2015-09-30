@@ -1,4 +1,5 @@
 CC=gcc
+CFLAGS=-Wall
 
 all: radnsd
 
