@@ -71,7 +71,7 @@ void		dnssl_timer(intptr_t data);
 void
 usage(void)
 {
-	fprintf(stderr, "usage: rdnssd [-fdh]\n");
+	fprintf(stderr, "usage: radnsd [-fdh]\n");
 	exit(EXIT_FAILURE);
 
 }
