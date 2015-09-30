@@ -1,0 +1,21 @@
+#!/bin/sh
+#
+
+# PROVIDE: radnsd
+# REQUIRE: DAEMON
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name=radnsd
+rcvar=radnsd_enable
+
+load_rc_config $name
+
+: ${radnsd_enable="NO"}
+: ${radnsd_pidfile="/var/run/${name}.pid"}
+
+command="/usr/local/sbin/${name}"
+pidfile="${radnsd_pidfile}"
+
+run_rc_command $*

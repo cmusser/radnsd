@@ -1,0 +1,50 @@
+.Dd Sep 30, 2015
+.Dt RADNSD 8
+.Os
+.\"
+.Sh NAME
+.Nm radnsd ,
+.Nd IPv6 DNS configuration daemon
+.\"
+.Sh SYNOPSIS
+.Nm
+.Op df
+.\"
+.Sh DESCRIPTION
+.Nm
+is a daemon that extracts DNS configuration from IPv6 router
+advertisments and writes that information to
+.Pa /etc/resolv.conf.
+The daemon aims to conform to RFC6106.
+.Nm
+is useful for clients on an IPv6 network that does not provide DHCPv6
+service, but does have routers configured to provide DNS resolver and
+domain search list information.
+.Sh OPTIONS
+.Bl -tag -width indent
+.It Fl d
+Enable debugging.
+.It Fl f
+Prevent
+.Nm
+from becoming a daemon (foreground mode).
+Warning messages are generated to standard error
+instead of
+.Xr syslog 3 .
+.El
+.Sh FILES
+.\"
+.Sh SEE ALSO
+.Xr rtadvd 8
+.Pp
+.Em RFC 6106
+- IPv6 Router Advertisement Options for DNS Configuration
+.\"
+.Sh BUGS
+.Nm
+writes to directly to
+.Pa /etc/resolv.conf
+making it incompatible with other programs that do so, such as
+.Nm dhclient
+or
+.Nm dhcpcd
