@@ -75,8 +75,7 @@ void		process_rdnss_opt(struct nd_opt_rdnss *rdnss_p);
 void		process_dnssl_opt(struct nd_opt_dnssl *dnssl_p);
 void		sock_input (void);
 void		write_resolv_conf(char *ifname);
-void		rdnss_timer(intptr_t data);
-void		dnssl_timer(intptr_t data);
+void		expire_timer(uintptr_t data);
 
 void
 usage(void)
@@ -329,7 +328,7 @@ process_dnssl_opt(struct nd_opt_dnssl *dnssl)
 void
 sock_input(void)
 {
-	int		i;
+ 	int		i;
 	struct nd_router_advert *ra;
 	char           *cur, *end;
 	struct nd_opt_hdr *opt;
@@ -396,21 +395,30 @@ sock_input(void)
 }
 
 void
-rdnss_timer(intptr_t data)
+expire_timer(uintptr_t id)
 {
-	log_msg(LOG_DEBUG, __func__, "RDNSS: expired: %u, count %d", time(NULL), data);
-	rdnss_ltime = 0;
-	clear_radns_list(&rdnss_list);
-	write_resolv_conf(ifname);
-}
+	bool timer_ok = true;
+	char *timer_name;
 
-void
-dnssl_timer(intptr_t data)
-{
-	log_msg(LOG_DEBUG, __func__, "DNSSL: expired: %u, count %d", time(NULL), data);
-	dnssl_ltime = 0;
-	clear_radns_list(&dnssl_list);
-	write_resolv_conf(ifname);
+	switch (id) {
+	case RDNSS_TIMER_ID:
+		timer_name = "RDNSS";
+		rdnss_ltime = 0;
+		clear_radns_list(&rdnss_list);
+		break;
+	case DNSSL_TIMER_ID:
+		timer_name = "DNSSL";
+		dnssl_ltime = 0;
+		clear_radns_list(&dnssl_list);
+		break;
+	default:
+		timer_name = "UNKNOWN";
+		timer_ok = false;
+	}
+
+	log_msg(LOG_INFO, __func__, "%s: expired: %u", timer_name, time(NULL));
+	if (timer_ok)
+		write_resolv_conf(ifname);
 }
 
 int
@@ -481,12 +489,8 @@ main(int argc, char *argv[])
 				} else {
 					if (event[i].ident == (uintptr_t) s)
 						sock_input();
-					else if (event[i].ident == RDNSS_TIMER_ID &&
-					    event[i].filter == EVFILT_TIMER)
-						rdnss_timer(event[i].data);
-					else if (event[i].ident == DNSSL_TIMER_ID &&
-					    event[i].filter == EVFILT_TIMER)
-						dnssl_timer(event[i].data);
+					else if (event[i].filter == EVFILT_TIMER)
+						expire_timer(event[i].ident);
 				}
 			}
 		}
