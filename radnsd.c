@@ -205,7 +205,6 @@ write_resolv_conf(char *ifname)
 	bool		has_dnssl = false;
 	char		dnssl     [256] = {'\0'};
 
-
 	resolv_conf = fopen("/etc/resolv.conf", "w");
 	if (resolv_conf != NULL) {
 		fprintf(resolv_conf, "# from %s (RA)\n", ifname);
@@ -238,7 +237,6 @@ process_rdnss_opt(struct nd_opt_rdnss *rdnss)
 	ltime = (intptr_t) ntohl(rdnss->nd_opt_rdnss_lifetime);
 	log_msg(LOG_INFO, __func__, "RDNSS Option (lifetime: %d, will expire: %d, 8-octet units: %u)",
 		ltime, time(NULL) + ltime, rdnss->nd_opt_rdnss_len);
-
 
 	if (rdnss_ltime > 0)
 		changelist_set_timer(&changelist, RDNSS_TIMER_ID, DELETE_TIMER);
@@ -462,9 +460,8 @@ main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	if ((s = sockopen()) < 0) {
+	if ((s = sockopen()) < 0)
 		exit(EXIT_FAILURE);
-	}
 
 	log_msg(LOG_NOTICE, __func__, "started%s", dflag ? " (debug output)" : "");
 
@@ -483,15 +480,14 @@ main(int argc, char *argv[])
 						strerror(event[i].data), event[i].ident);
 					exit(EXIT_FAILURE);
 				} else {
-					if (event[i].ident == (uintptr_t) s) {
+					if (event[i].ident == (uintptr_t) s)
 						sock_input();
-					} else if (event[i].ident == RDNSS_TIMER_ID &&
-					  event[i].filter == EVFILT_TIMER) {
+					else if (event[i].ident == RDNSS_TIMER_ID &&
+					    event[i].filter == EVFILT_TIMER)
 						rdnss_timer(event[i].data);
-					} else if (event[i].ident == DNSSL_TIMER_ID &&
-					  event[i].filter == EVFILT_TIMER) {
+					else if (event[i].ident == DNSSL_TIMER_ID &&
+					    event[i].filter == EVFILT_TIMER)
 						dnssl_timer(event[i].data);
-					}
 				}
 			}
 		}
