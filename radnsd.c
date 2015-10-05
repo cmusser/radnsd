@@ -20,7 +20,6 @@
 #include <time.h>
 #include <unistd.h>
 
-/* TODO: option processing and fork. Take RA lifetime into account */
 struct dns_str {
 	char		str       [256];
 			TAILQ_ENTRY   (dns_str) entries;
@@ -59,7 +58,7 @@ static struct sockaddr_in6 sin6_allrouters = {
 };
 
 void		usage(void);
-void		msg   (int priority, const char *func, const char *msg,...);
+void		log_msg   (int priority, const char *func, const char *msg,...);
 void		clear_radns_list(struct radns_list_t *list);
 int		sockopen   (void);
 int		process_rdnss_opt(struct nd_opt_rdnss *rdnss_p, int cur_idx);
@@ -78,7 +77,7 @@ usage(void)
 }
 
 void
-msg(int priority, const char *func, const char *msg,...)
+log_msg(int priority, const char *func, const char *msg,...)
 {
 	va_list		ap;
 	char		buf       [BUFSIZ];
@@ -129,19 +128,19 @@ sockopen(void)
 	sin6_allrouters.sin6_len = sizeof(sin6_allrouters);
 	if (inet_pton(AF_INET6, ALLROUTER,
 		      &sin6_allrouters.sin6_addr.s6_addr) != 1) {
-		msg(LOG_ERR, __func__, "inet_pton failed for %s",
+		log_msg(LOG_ERR, __func__, "inet_pton failed for %s",
 			ALLROUTER);
 		return (-1);
 	}
 	if ((rssock = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6)) < 0) {
-		msg(LOG_ERR, __func__, "socket: %s", strerror(errno));
+		log_msg(LOG_ERR, __func__, "socket: %s", strerror(errno));
 		return (-1);
 	}
 	/* Return receiving interface */
 	on = 1;
 	if (setsockopt(rssock, IPPROTO_IPV6, IPV6_RECVPKTINFO, &on,
 		       sizeof(on)) < 0) {
-		msg(LOG_ERR, __func__, "IPV6_RECVPKTINFO: %s",
+		log_msg(LOG_ERR, __func__, "IPV6_RECVPKTINFO: %s",
 			strerror(errno));
 		exit(1);
 	}
@@ -150,7 +149,7 @@ sockopen(void)
 	ICMP6_FILTER_SETPASS(ND_ROUTER_ADVERT, &filt);
 	if (setsockopt(rssock, IPPROTO_ICMPV6, ICMP6_FILTER, &filt,
 		       sizeof(filt)) == -1) {
-		msg(LOG_ERR, __func__, "setsockopt(ICMP6_FILTER): %s",
+		log_msg(LOG_ERR, __func__, "setsockopt(ICMP6_FILTER): %s",
 			strerror(errno));
 		return (-1);
 	}
@@ -201,7 +200,7 @@ process_rdnss_opt(struct nd_opt_rdnss *rdnss, int cur_idx)
 	struct in6_addr *cur_addr_p;
 
 	ltime = (intptr_t) ntohl(rdnss->nd_opt_rdnss_lifetime);
-	msg(LOG_INFO, __func__, "RDNSS Option (lifetime: %d, will expire: %d, 8-octet units: %u)",
+	log_msg(LOG_INFO, __func__, "RDNSS Option (lifetime: %d, will expire: %d, 8-octet units: %u)",
 		ltime, time(NULL) + ltime, rdnss->nd_opt_rdnss_len);
 
 
@@ -240,7 +239,7 @@ process_dnssl_opt(struct nd_opt_dnssl *dnssl, int cur_idx)
 
 
 	ltime = (intptr_t) ntohl(dnssl->nd_opt_dnssl_lifetime);
-	msg(LOG_INFO, __func__, "DNSSL Option (lifetime: %d, will expire: %d, 8-octet units: %u)",
+	log_msg(LOG_INFO, __func__, "DNSSL Option (lifetime: %d, will expire: %d, 8-octet units: %u)",
 		ltime, time(NULL) + ltime, dnssl->nd_opt_dnssl_len);
 
 	if (dnssl_ltime > 0)
@@ -280,11 +279,11 @@ process_dnssl_opt(struct nd_opt_dnssl *dnssl, int cur_idx)
 				if (strlcat(domain, segment, sizeof(domain)) <= sizeof(domain)) {
 				} else {
 					skip = true;
-					msg(LOG_ERR, __func__, "domain \"%s\" too long, skipping", domain);
+					log_msg(LOG_ERR, __func__, "domain \"%s\" too long, skipping", domain);
 				}
 			} else {
 				skip = true;
-				msg(LOG_ERR, __func__, "label \"%s\" too long, skipping domain", label);
+				log_msg(LOG_ERR, __func__, "label \"%s\" too long, skipping domain", label);
 			}
 		}
 		/*
@@ -298,6 +297,7 @@ process_dnssl_opt(struct nd_opt_dnssl *dnssl, int cur_idx)
 	return cur_idx;
 }
 
+/* TODO: Take RA lifetime into account */
 int
 sock_input(void)
 {
@@ -311,14 +311,14 @@ sock_input(void)
 	struct in6_pktinfo *pi = NULL;
 
 	if ((i = recvmsg(rssock, &rcvmhdr, 0)) < 0) {
-		msg(LOG_ERR, __func__, "recvmsg: %s", strerror(errno));
+		log_msg(LOG_ERR, __func__, "recvmsg: %s", strerror(errno));
 		return 0;
 	}
 	clear_radns_list(&rdnss_list);
 	clear_radns_list(&dnssl_list);
 
 	ra = rcviov[0].iov_base;
-	msg(LOG_INFO, __func__, "RA received at %lu (lifetime: %lu)",
+	log_msg(LOG_INFO, __func__, "RA received at %lu (lifetime: %lu)",
 		time(NULL), ntohs(ra->nd_ra_router_lifetime));
 
 	end = rcviov[0].iov_base + i;
@@ -341,7 +341,7 @@ sock_input(void)
 			nchanges = process_dnssl_opt((struct nd_opt_dnssl *)opt, nchanges);
 			break;
 		default:
-			msg(LOG_WARNING, __func__, "unrecognized message: %d",
+			log_msg(LOG_WARNING, __func__, "unrecognized message: %d",
 				opt->nd_opt_type);
 		}
 		cur += (opt->nd_opt_len * 8);
@@ -373,7 +373,7 @@ sock_input(void)
 void
 rdnss_timer(intptr_t data)
 {
-	msg(LOG_DEBUG, __func__, "RDNSS: expired: %u, count %d", time(NULL), data);
+	log_msg(LOG_DEBUG, __func__, "RDNSS: expired: %u, count %d", time(NULL), data);
 	rdnss_ltime = 0;
 	clear_radns_list(&rdnss_list);
 	write_resolv_conf(ifname);
@@ -382,7 +382,7 @@ rdnss_timer(intptr_t data)
 void
 dnssl_timer(intptr_t data)
 {
-	msg(LOG_DEBUG, __func__, "DNSSL: expired: %u, count %d", time(NULL), data);
+	log_msg(LOG_DEBUG, __func__, "DNSSL: expired: %u, count %d", time(NULL), data);
 	dnssl_ltime = 0;
 	clear_radns_list(&dnssl_list);
 	write_resolv_conf(ifname);
@@ -431,7 +431,7 @@ main(int argc, char *argv[])
 		daemon(0, 0);
 
 	if ((kq = kqueue()) == -1) {
-		msg(LOG_ERR, __func__, "kqueue(): %s", strerror(errno));
+		log_msg(LOG_ERR, __func__, "kqueue(): %s", strerror(errno));
 		exit(EXIT_FAILURE);
 	}
 
@@ -439,7 +439,7 @@ main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	msg(LOG_NOTICE, __func__, "started%s", dflag ? " (debug output" : "");
+	log_msg(LOG_NOTICE, __func__, "started%s", dflag ? " (debug output" : "");
 
 	EV_SET(&change[0], s, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0);
 	nchanges = 1;
@@ -447,12 +447,12 @@ main(int argc, char *argv[])
 		nev = kevent(kq, change, nchanges, event, COUNT_OF(event), NULL);
 		nchanges = 0;
 		if (nev < 0) {
-			msg(LOG_ERR, __func__, "kevent: %s", strerror(errno));
+			log_msg(LOG_ERR, __func__, "kevent: %s", strerror(errno));
 			exit(EXIT_FAILURE);
 		} else {
 			for (i = 0; i < nev; i++) {
 				if (event[i].flags & EV_ERROR) {
-					msg(LOG_ERR, "EV_ERROR: %s for %lu\n",
+					log_msg(LOG_ERR, "EV_ERROR: %s for %lu\n",
 						strerror(event[i].data), event[i].ident);
 					exit(EXIT_FAILURE);
 				} else {
