@@ -112,7 +112,7 @@ clear_radns_list(struct radns_list_t *list)
 
 	while (!TAILQ_EMPTY(list)) {
 		cur_str = TAILQ_FIRST(list);
-		TAILQ_REMOVE(&rdnss_list, cur_str, entries);
+		TAILQ_REMOVE(list, cur_str, entries);
 		free(cur_str);
 	}
 }
@@ -218,9 +218,9 @@ write_resolv_conf(char *ifname)
 		}
 		fprintf(resolv_conf, "%s\n", dnssl);
 
-		TAILQ_FOREACH(cur, &rdnss_list, entries) {
+		TAILQ_FOREACH(cur, &rdnss_list, entries)
 			fprintf(resolv_conf, "nameserver %s\n", cur->str);
-		}
+
 		fclose(resolv_conf);
 	}
 }
@@ -467,7 +467,6 @@ main(int argc, char *argv[])
 
 	changelist_set_listen_sock(&changelist, s);
 	for (;;) {
-		printf("%d\n", changelist.count);
 		nev = kevent(kq, changelist.event, changelist.count, event, COUNT_OF(event), NULL);
 		changelist_reset(&changelist);
 		if (nev < 0) {
