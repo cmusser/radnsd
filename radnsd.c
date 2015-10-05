@@ -5,6 +5,7 @@
 #include <sys/types.h>
 
 #include <arpa/inet.h>
+#include <net/if.h>
 #include <netinet/icmp6.h>
 #include <netinet/in.h>
 
@@ -36,6 +37,7 @@ struct msghdr	rcvmhdr;
 u_char		answer  [1500];
 struct iovec	rcviov[1];
 static struct sockaddr_in6 from;
+char ifname[IFNAMSIZ];
 intptr_t	rdnss_ltime = 0;
 intptr_t	dnssl_ltime = 0;
 
@@ -63,7 +65,7 @@ int		sockopen   (void);
 int		process_rdnss_opt(struct nd_opt_rdnss *rdnss_p, int cur_idx);
 int		process_dnssl_opt(struct nd_opt_dnssl *dnssl_p, int cur_idx);
 int		sock_input (void);
-void		write_resolv_conf(void);
+void		write_resolv_conf(char *ifname);
 void		rdnss_timer(intptr_t data);
 void		dnssl_timer(intptr_t data);
 
@@ -178,7 +180,7 @@ sockopen(void)
 }
 
 void
-write_resolv_conf(void)
+write_resolv_conf(char *ifname)
 {
 	FILE           *resolv_conf;
 	struct dns_str *cur;
@@ -186,6 +188,7 @@ write_resolv_conf(void)
 
 	resolv_conf = fopen("/etc/resolv.conf", "w");
 	if (resolv_conf != NULL) {
+		fprintf(resolv_conf, "# from %s (RA)\n", ifname);
 		strlcpy(dnssl, "search", sizeof(dnssl));
 		TAILQ_FOREACH(cur, &dnssl_list, entries) {
 			if (strlcat(dnssl, " ", sizeof(dnssl)) <= sizeof(dnssl))
@@ -315,6 +318,9 @@ sock_input(void)
 	char           *cur, *end;
 	struct nd_opt_hdr *opt;
 	int		nchanges = 0;
+	int ifindex = 0;
+	struct cmsghdr *cm;
+	struct in6_pktinfo *pi = NULL;
 
 	if ((i = recvmsg(rssock, &rcvmhdr, 0)) < 0) {
 		msg(LOG_ERR, __func__, "recvmsg: %s", strerror(errno));
@@ -353,8 +359,25 @@ sock_input(void)
 		cur += (opt->nd_opt_len * 8);
 	}
 
+	for (cm = (struct cmsghdr *)CMSG_FIRSTHDR(&rcvmhdr);
+	     cm;
+	     cm = (struct cmsghdr *)CMSG_NXTHDR(&rcvmhdr, cm)) {
+		if (cm->cmsg_level == IPPROTO_IPV6 &&
+		    cm->cmsg_type == IPV6_PKTINFO &&
+		    cm->cmsg_len == CMSG_LEN(sizeof(struct in6_pktinfo))) {
+			pi = (struct in6_pktinfo *)(CMSG_DATA(cm));
+			ifindex = pi->ipi6_ifindex;
+		}
+	}
+
+	if (ifindex == 0)
+		strlcpy(ifname, "unknown", sizeof(ifname));
+	else
+		if_indextoname(pi->ipi6_ifindex, ifname);
+
+
 	if (nchanges > 0)
-		write_resolv_conf();
+		write_resolv_conf(ifname);
 
 	return nchanges;
 }
@@ -365,7 +388,7 @@ rdnss_timer(intptr_t data)
 	msg(LOG_DEBUG, __func__, "RDNSS: expired: %u, count %d", time(NULL), data);
 	rdnss_ltime = 0;
 	clear_rdnss_list();
-	write_resolv_conf();
+	write_resolv_conf(ifname);
 }
 
 void
@@ -374,10 +397,10 @@ dnssl_timer(intptr_t data)
 	msg(LOG_DEBUG, __func__, "DNSSL: expired: %u, count %d", time(NULL), data);
 	dnssl_ltime = 0;
 	clear_dnssl_list();
-	write_resolv_conf();
+	write_resolv_conf(ifname);
 }
 
-int 
+int
 main(int argc, char *argv[])
 {
 	struct kevent	event[3];
@@ -418,18 +441,18 @@ main(int argc, char *argv[])
 
 	if (!fflag)
 		daemon(0, 0);
-	
+
 	if ((kq = kqueue()) == -1) {
 		msg(LOG_ERR, __func__, "kqueue(): %s", strerror(errno));
 		exit(EXIT_FAILURE);
 	}
-	
+
 	if ((s = sockopen()) < 0) {
 		exit(EXIT_FAILURE);
 	}
 
 	msg(LOG_NOTICE, __func__, "started%s", dflag ? " (debug output" : "");
-	
+
 	EV_SET(&change[0], s, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0);
 	nchanges = 1;
 	for (;;) {
