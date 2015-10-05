@@ -25,8 +25,9 @@ struct dns_str {
 	char		str       [256];
 			TAILQ_ENTRY   (dns_str) entries;
 };
-TAILQ_HEAD(rdnss_list_t, dns_str) rdnss_list = TAILQ_HEAD_INITIALIZER(rdnss_list);
-TAILQ_HEAD(dnssl_list_t, dns_str) dnssl_list = TAILQ_HEAD_INITIALIZER(dnssl_list);
+TAILQ_HEAD(radns_list_t, dns_str);
+struct radns_list_t rdnss_list = TAILQ_HEAD_INITIALIZER(rdnss_list);
+struct radns_list_t dnssl_list = TAILQ_HEAD_INITIALIZER(dnssl_list);
 
 struct kevent	change[4];
 int		log_upto = LOG_NOTICE;
@@ -59,8 +60,7 @@ static struct sockaddr_in6 sin6_allrouters = {
 
 void		usage(void);
 void		msg   (int priority, const char *func, const char *msg,...);
-void		clear_rdnss_list(void);
-void		clear_dnssl_list(void);
+void		clear_radns_list(struct radns_list_t *list);
 int		sockopen   (void);
 int		process_rdnss_opt(struct nd_opt_rdnss *rdnss_p, int cur_idx);
 int		process_dnssl_opt(struct nd_opt_dnssl *dnssl_p, int cur_idx);
@@ -98,25 +98,13 @@ msg(int priority, const char *func, const char *msg,...)
 }
 
 void
-clear_rdnss_list(void)
+clear_radns_list(struct radns_list_t *list)
 {
 	struct dns_str *cur_str;
 
-	while (!TAILQ_EMPTY(&rdnss_list)) {
-		cur_str = TAILQ_FIRST(&rdnss_list);
+	while (!TAILQ_EMPTY(list)) {
+		cur_str = TAILQ_FIRST(list);
 		TAILQ_REMOVE(&rdnss_list, cur_str, entries);
-		free(cur_str);
-	}
-}
-
-void
-clear_dnssl_list(void)
-{
-	struct dns_str *cur_str;
-
-	while (!TAILQ_EMPTY(&dnssl_list)) {
-		cur_str = TAILQ_FIRST(&dnssl_list);
-		TAILQ_REMOVE(&dnssl_list, cur_str, entries);
 		free(cur_str);
 	}
 }
@@ -326,8 +314,8 @@ sock_input(void)
 		msg(LOG_ERR, __func__, "recvmsg: %s", strerror(errno));
 		return 0;
 	}
-	clear_rdnss_list();
-	clear_dnssl_list();
+	clear_radns_list(&rdnss_list);
+	clear_radns_list(&dnssl_list);
 
 	ra = rcviov[0].iov_base;
 	msg(LOG_INFO, __func__, "RA received at %lu (lifetime: %lu)",
@@ -387,7 +375,7 @@ rdnss_timer(intptr_t data)
 {
 	msg(LOG_DEBUG, __func__, "RDNSS: expired: %u, count %d", time(NULL), data);
 	rdnss_ltime = 0;
-	clear_rdnss_list();
+	clear_radns_list(&rdnss_list);
 	write_resolv_conf(ifname);
 }
 
@@ -396,7 +384,7 @@ dnssl_timer(intptr_t data)
 {
 	msg(LOG_DEBUG, __func__, "DNSSL: expired: %u, count %d", time(NULL), data);
 	dnssl_ltime = 0;
-	clear_dnssl_list();
+	clear_radns_list(&dnssl_list);
 	write_resolv_conf(ifname);
 }
 
