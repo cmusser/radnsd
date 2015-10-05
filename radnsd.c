@@ -34,7 +34,22 @@ struct event_changelist {
 	struct kevent	event[4];
 };
 
+#define ALLROUTER "ff02::2"
+static struct sockaddr_in6 sin6_allrouters = {
+	sizeof(sin6_allrouters),
+	AF_INET6,
+	0,
+	0,
+	IN6ADDR_ANY_INIT,
+	0
+};
+
+#define COUNT_OF(x) ((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
+#define ADDRCOUNT(rdnss_p) ((rdnss_p->nd_opt_rdnss_len - 1) / 2)
 #define DELETE_TIMER 0
+#define RDNSS_TIMER_ID 1
+#define DNSSL_TIMER_ID 2
+
 
 struct event_changelist changelist;
 int		log_upto = LOG_NOTICE;
@@ -45,25 +60,9 @@ struct msghdr	rcvmhdr;
 u_char		answer  [1500];
 struct iovec	rcviov[1];
 static struct sockaddr_in6 from;
-char ifname[IFNAMSIZ];
+char		ifname[IFNAMSIZ];
 intptr_t	rdnss_ltime = 0;
 intptr_t	dnssl_ltime = 0;
-
-#define COUNT_OF(x) ((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
-#define ADDRCOUNT(rdnss_p) ((rdnss_p->nd_opt_rdnss_len - 1) / 2)
-
-#define RDNSS_TIMER_ID 1
-#define DNSSL_TIMER_ID 2
-
-#define ALLROUTER "ff02::2"
-static struct sockaddr_in6 sin6_allrouters = {
-	sizeof(sin6_allrouters),
-	AF_INET6,
-	0,
-	0,
-	IN6ADDR_ANY_INIT,
-	0
-};
 
 void		usage(void);
 void		log_msg   (int priority, const char *func, const char *msg,...);
@@ -84,7 +83,6 @@ usage(void)
 {
 	fprintf(stderr, "usage: radnsd [-fdh]\n");
 	exit(EXIT_FAILURE);
-
 }
 
 void
@@ -259,7 +257,6 @@ process_rdnss_opt(struct nd_opt_rdnss *rdnss)
 			TAILQ_INSERT_TAIL(&rdnss_list, rdnss_str, entries);
 		}
 	}
-
 }
 
 void
@@ -328,7 +325,6 @@ process_dnssl_opt(struct nd_opt_dnssl *dnssl)
 		prev = *cur;
 		cur += (*cur + 1);
 	}
-
 }
 
 /* TODO: Take RA lifetime into account */
@@ -399,7 +395,6 @@ sock_input(void)
 
 	if (changelist.count > 0)
 		write_resolv_conf(ifname);
-
 }
 
 void
