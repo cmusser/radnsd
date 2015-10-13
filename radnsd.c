@@ -20,18 +20,34 @@
 #include <time.h>
 #include <unistd.h>
 
-struct dns_str {
-	char		str       [256];
-			TAILQ_ENTRY   (dns_str) entries;
+typedef enum timer_type {
+	RDNSS_TIMER = 0,
+	DNSSL_TIMER = 1
+} timer_type;
+
+struct dns_data {
+	timer_type	timer_type; /* used to select list in which to search for this element */
+	uintptr_t	timer_id;   /* current timer. Deleted and replaced when update arrives */
+	char		str       [256]; /* domain name or server address */
+	char		expiry[26]; /* For display */
+			TAILQ_ENTRY   (dns_data) entries;
 };
 
-TAILQ_HEAD(radns_list_t, dns_str);
+TAILQ_HEAD(radns_list_t, dns_data);
 struct radns_list_t rdnss_list = TAILQ_HEAD_INITIALIZER(rdnss_list);
 struct radns_list_t dnssl_list = TAILQ_HEAD_INITIALIZER(dnssl_list);
 
+struct change_kev {
+	struct kevent kev;
+	TAILQ_ENTRY   (change_kev) entries;
+};
+
+TAILQ_HEAD(change_kev_list_t, change_kev);
+
 struct event_changelist {
 	int count;
-	struct kevent	event[4];
+	uint32_t cur_timer_id;
+	struct change_kev_list_t events;
 };
 
 #define ALLROUTER "ff02::2"
@@ -47,9 +63,6 @@ static struct sockaddr_in6 sin6_allrouters = {
 #define COUNT_OF(x) ((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
 #define ADDRCOUNT(rdnss_p) ((rdnss_p->nd_opt_rdnss_len - 1) / 2)
 #define DELETE_TIMER 0
-#define RDNSS_TIMER_ID 1
-#define DNSSL_TIMER_ID 2
-
 
 struct event_changelist changelist;
 int		log_upto = LOG_NOTICE;
@@ -61,21 +74,21 @@ u_char		answer  [1500];
 struct iovec	rcviov[1];
 static struct sockaddr_in6 from;
 char		ifname[IFNAMSIZ];
-intptr_t	rdnss_ltime = 0;
-intptr_t	dnssl_ltime = 0;
 
 void		usage(void);
 void		log_msg   (int priority, const char *func, const char *msg,...);
-void		clear_radns_list(struct radns_list_t *list);
-void		changelist_set_listen_sock(struct event_changelist *list, int s);
-void		changelist_reset(struct event_changelist *list);
-void		changelist_set_timer(struct event_changelist *list, uintptr_t id, intptr_t timeout);
+struct dns_data  *find_radns_by_str(struct radns_list_t *list, char *str);
+void		changelist_init(struct event_changelist *list, int s);
+bool		changelist_set_timer(struct event_changelist *list, struct dns_data *data, intptr_t timeout);
+int		changelist_event_listen(int kq, struct event_changelist *list, struct kevent *event);
 int		sockopen   (void);
-void		process_rdnss_opt(struct nd_opt_rdnss *rdnss_p);
-void		process_dnssl_opt(struct nd_opt_dnssl *dnssl_p);
+void		process_rdnss_opt(uint16_t ra_ltime, struct nd_opt_rdnss *rdnss_p);
+void		process_dnssl_opt(uint16_t ra_ltime, struct nd_opt_dnssl *dnssl_p);
 void		sock_input (void);
 void		write_resolv_conf(char *ifname);
-void		expire_timer(uintptr_t data);
+void		expire_timer(struct kevent *kev);
+size_t		get_max_width(struct radns_list_t *list, size_t max);
+void		dump_state(void);
 
 void
 usage(void)
@@ -104,38 +117,84 @@ log_msg(int priority, const char *func, const char *msg,...)
 	va_end(ap);
 }
 
-void
-clear_radns_list(struct radns_list_t *list)
+struct dns_data *
+find_radns_by_str(struct radns_list_t *list, char *str)
 {
-	struct dns_str *cur_str;
+	struct dns_data *cur;
 
-	while (!TAILQ_EMPTY(list)) {
-		cur_str = TAILQ_FIRST(list);
-		TAILQ_REMOVE(list, cur_str, entries);
-		free(cur_str);
+	TAILQ_FOREACH(cur, list, entries) {
+		if (strcmp(cur->str, str) == 0)
+			return cur;
 	}
+
+	return NULL;
 }
 
 void
-changelist_set_listen_sock(struct event_changelist *list, int s)
+changelist_init(struct event_changelist *list, int s)
 {
-	list->count = 1;
-	EV_SET(&list->event[0], s, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0);
+	struct change_kev *change;
+
+	list->cur_timer_id = 0;
+	TAILQ_INIT(&list->events);
+	list->count = 2;
+	change = calloc(sizeof(struct change_kev), 1);
+	EV_SET(&change->kev, s, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0);
+	TAILQ_INSERT_TAIL(&list->events, change, entries);
+	change = calloc(sizeof(struct change_kev), 1);
+	EV_SET(&change->kev, SIGUSR1, EVFILT_SIGNAL, EV_ADD | EV_ENABLE, 0, 0, 0);
+	TAILQ_INSERT_TAIL(&list->events, change, entries);
 }
 
-void
-changelist_reset(struct event_changelist *list)
+bool
+changelist_set_timer(struct event_changelist *list, struct dns_data *data, intptr_t timeout)
 {
+	bool rv = true;
+	struct change_kev *change;
+
+	change = calloc(sizeof(struct change_kev), 1);
+	if (change == NULL) {
+		log_msg(LOG_ERR, __func__, "malloc for timer change event failed");
+		rv = false;
+	} else {
+		list->count++;
+		EV_SET(&change->kev, data->timer_id, EVFILT_TIMER,
+		    (timeout == DELETE_TIMER) ? EV_DELETE
+		    : (EV_ADD | EV_ENABLE | EV_ONESHOT),
+		    0, timeout, data);
+		TAILQ_INSERT_TAIL(&list->events, change, entries);
+	}
+
+	return rv;
+}
+
+int
+changelist_event_listen(int kq, struct event_changelist *list, struct kevent *event) {
+	int nev, i;
+	struct kevent *changes;
+	struct change_kev *change;
+
+	changes = calloc(sizeof(struct kevent), list->count);
+	if (changes == NULL) {
+		nev = 0;
+		log_msg(LOG_ERR, __func__, "malloc for kevent array failed");
+	} else {
+		i = 0;
+		TAILQ_FOREACH(change, &list->events, entries)
+			changes[i++] = change->kev;
+
+		nev = kevent(kq, changes, list->count, event, 1, NULL);
+		free(changes);
+	}
+
 	list->count = 0;
-	bzero(&list->event, sizeof(list->event));
-}
+	while (!TAILQ_EMPTY(&list->events)) {
+		change = TAILQ_FIRST(&list->events);
+		TAILQ_REMOVE(&list->events, change, entries);
+		free(change);
+	}
 
-void
-changelist_set_timer(struct event_changelist *list, uintptr_t id, intptr_t timeout)
-{
-	EV_SET(&list->event[list->count++], id, EVFILT_TIMER,
-	    (timeout == DELETE_TIMER) ? EV_DELETE : (EV_ADD | EV_ENABLE | EV_ONESHOT),
-	    0, timeout, 0);
+	return nev;
 }
 
 int
@@ -200,7 +259,7 @@ void
 write_resolv_conf(char *ifname)
 {
 	FILE           *resolv_conf;
-	struct dns_str *cur;
+	struct dns_data *cur;
 	bool		has_dnssl = false;
 	char		dnssl     [256] = {'\0'};
 
@@ -225,59 +284,87 @@ write_resolv_conf(char *ifname)
 }
 
 void
-process_rdnss_opt(struct nd_opt_rdnss *rdnss)
+format_timestamp(char *time_str, size_t bufsz, time_t *time)
+{
+	struct tm time_tm;
+
+	localtime_r(time, &time_tm);
+	strftime(time_str, bufsz, "%c", &time_tm);
+}
+
+
+void
+get_expiry_values(intptr_t *ltime, char *expiry_str, size_t bufsz, uint32_t opt_ltime,
+    uint16_t ra_ltime, char *desc)
+{
+	time_t expire_time;
+
+	*ltime = (intptr_t) ntohl(opt_ltime);
+	if (ra_ltime < *ltime)
+		*ltime = ra_ltime;
+
+	time(&expire_time);
+	expire_time += *ltime;
+	format_timestamp(expiry_str, bufsz, &expire_time);
+	log_msg(LOG_INFO, __func__, "%s option (lifetime: %u, expires %s)", desc, *ltime, expiry_str);
+	*ltime *= 1000;
+}
+
+void
+process_rdnss_opt(uint16_t ra_ltime, struct nd_opt_rdnss *rdnss)
 {
 
 	intptr_t	ltime;
+	char            expiry_str[26];
 	uint8_t		i;
-	struct dns_str *rdnss_str;
+	struct dns_data *rdnss_data;
 	struct in6_addr *cur_addr_p;
+	char            v6addr[INET6_ADDRSTRLEN];
 
-	ltime = (intptr_t) ntohl(rdnss->nd_opt_rdnss_lifetime);
-	log_msg(LOG_INFO, __func__, "RDNSS Option (lifetime: %d, will expire: %d, 8-octet units: %u)",
-		ltime, time(NULL) + ltime, rdnss->nd_opt_rdnss_len);
-
-	if (rdnss_ltime > 0)
-		changelist_set_timer(&changelist, RDNSS_TIMER_ID, DELETE_TIMER);
-
-	rdnss_ltime = ltime * 1000;
-	if (rdnss_ltime > 0)
-		changelist_set_timer(&changelist, RDNSS_TIMER_ID, rdnss_ltime);
+	get_expiry_values(&ltime, expiry_str, sizeof(expiry_str),
+	    rdnss->nd_opt_rdnss_lifetime, ra_ltime, "RDNSS");
 
 	for (cur_addr_p = (struct in6_addr *)(rdnss + 1), i = 0;
 	     i < ADDRCOUNT(rdnss);
 	     i++, cur_addr_p++) {
-		rdnss_str = malloc(sizeof(struct dns_str));
-		if (rdnss_str != NULL) {
-			inet_ntop(AF_INET6, cur_addr_p, rdnss_str->str,
-				  sizeof(rdnss_str->str));
-			TAILQ_INSERT_TAIL(&rdnss_list, rdnss_str, entries);
+		inet_ntop(AF_INET6, cur_addr_p, v6addr, sizeof(v6addr));
+		rdnss_data = find_radns_by_str(&rdnss_list, v6addr);
+		if (rdnss_data == NULL) { /* New server */
+			rdnss_data = malloc(sizeof(struct dns_data));
+			if (rdnss_data != NULL) {
+				rdnss_data->timer_type = RDNSS_TIMER;
+				rdnss_data->timer_id = ++changelist.cur_timer_id;
+				strlcpy(rdnss_data->str, v6addr, sizeof(rdnss_data->str));
+				strlcpy(rdnss_data->expiry, expiry_str, sizeof(rdnss_data->expiry));
+				TAILQ_INSERT_TAIL(&rdnss_list, rdnss_data, entries);
+				changelist_set_timer(&changelist, rdnss_data, ltime);
+			}
+		} else { /* Updated server */
+			changelist_set_timer(&changelist, rdnss_data, DELETE_TIMER);
+			if (ltime == 0)
+				TAILQ_REMOVE(&rdnss_list, rdnss_data, entries);
+			else {
+				rdnss_data->timer_id = ++changelist.cur_timer_id;
+				changelist_set_timer(&changelist, rdnss_data, ltime);
+			}
 		}
 	}
 }
 
 void
-process_dnssl_opt(struct nd_opt_dnssl *dnssl)
+process_dnssl_opt(uint16_t ra_ltime, struct nd_opt_dnssl *dnssl)
 {
 	intptr_t	ltime;
+	char            expiry_str[26];
 	uint8_t        *cur, prev = 0;
 	bool		skip = false;
 	char		label     [64];
 	char		segment   [65];
 	char		domain    [256] = {'\0'};
-	struct dns_str *dnssl_str;
+	struct dns_data *dnssl_data;
 
-
-	ltime = (intptr_t) ntohl(dnssl->nd_opt_dnssl_lifetime);
-	log_msg(LOG_INFO, __func__, "DNSSL Option (lifetime: %d, will expire: %d, 8-octet units: %u)",
-		ltime, time(NULL) + ltime, dnssl->nd_opt_dnssl_len);
-
-	if (dnssl_ltime > 0)
-		changelist_set_timer(&changelist, DNSSL_TIMER_ID, DELETE_TIMER);
-
-	dnssl_ltime = ltime * 1000;
-	if (dnssl_ltime > 0)
-		changelist_set_timer(&changelist, DNSSL_TIMER_ID, dnssl_ltime);
+	get_expiry_values(&ltime, expiry_str, sizeof(expiry_str),
+	    dnssl->nd_opt_dnssl_lifetime, ra_ltime, "DNSSL");
 
 	cur = (uint8_t *) (dnssl + 1);
 	while (!(*cur == 0 && prev == 0)) {
@@ -285,10 +372,26 @@ process_dnssl_opt(struct nd_opt_dnssl *dnssl)
 		if (*cur == 0) {
 			/* The end of a series of labels. */
 			if (!skip) {
-				dnssl_str = malloc(sizeof(struct dns_str));
-				if (dnssl_str != NULL) {
-					strlcpy(dnssl_str->str, domain, sizeof(dnssl_str->str));
-					TAILQ_INSERT_TAIL(&dnssl_list, dnssl_str, entries);
+				dnssl_data = find_radns_by_str(&dnssl_list, domain);
+				if (dnssl_data == NULL) { /* New domain */
+					dnssl_data = malloc(sizeof(struct dns_data));
+					if (dnssl_data != NULL) {
+						dnssl_data->timer_type = DNSSL_TIMER;
+						dnssl_data->timer_id = ++changelist.cur_timer_id;
+						strlcpy(dnssl_data->str, domain, sizeof(dnssl_data->str));
+						strlcpy(dnssl_data->expiry, expiry_str, sizeof(dnssl_data->expiry));
+						TAILQ_INSERT_TAIL(&dnssl_list, dnssl_data, entries);
+						changelist_set_timer(&changelist, dnssl_data, ltime);
+					}
+				} else { /* Updated domain */
+					changelist_set_timer(&changelist, dnssl_data, DELETE_TIMER);
+					if (ltime == 0)
+						TAILQ_REMOVE(&dnssl_list, dnssl_data, entries);
+					else {
+						dnssl_data->timer_id = ++changelist.cur_timer_id;
+						changelist_set_timer(&changelist, dnssl_data, ltime);
+					}
+
 				}
 				bzero(domain, sizeof(domain));
 			}
@@ -324,12 +427,14 @@ process_dnssl_opt(struct nd_opt_dnssl *dnssl)
 	}
 }
 
-/* TODO: Take RA lifetime into account */
 void
 sock_input(void)
 {
  	int		i;
 	struct nd_router_advert *ra;
+	uint16_t	ra_ltime;
+	time_t		now;
+	char		now_str[26];
 	char           *cur, *end;
 	struct nd_opt_hdr *opt;
 	int ifindex = 0;
@@ -340,12 +445,13 @@ sock_input(void)
 		log_msg(LOG_ERR, __func__, "recvmsg: %s", strerror(errno));
 		return;
 	}
-	clear_radns_list(&rdnss_list);
-	clear_radns_list(&dnssl_list);
 
 	ra = rcviov[0].iov_base;
-	log_msg(LOG_INFO, __func__, "RA received at %lu (lifetime: %lu)",
-		time(NULL), ntohs(ra->nd_ra_router_lifetime));
+	ra_ltime = ntohs(ra->nd_ra_router_lifetime);
+	time(&now);
+	format_timestamp(now_str, sizeof(now_str),  &now);
+	log_msg(LOG_INFO, __func__, "RA received at %s (lifetime: %lu)",
+		now_str, ra_ltime);
 
 	end = rcviov[0].iov_base + i;
 	cur = (char *)(ra + 1);
@@ -361,10 +467,10 @@ sock_input(void)
 			//Recognized, but not relevant
 			break;
 		case ND_OPT_RDNSS:
-			process_rdnss_opt((struct nd_opt_rdnss *)opt);
+			process_rdnss_opt(ra_ltime, (struct nd_opt_rdnss *)opt);
 			break;
 		case ND_OPT_DNSSL:
-			process_dnssl_opt((struct nd_opt_dnssl *)opt);
+			process_dnssl_opt(ra_ltime, (struct nd_opt_dnssl *)opt);
 			break;
 		default:
 			log_msg(LOG_WARNING, __func__, "unrecognized message: %d",
@@ -395,37 +501,60 @@ sock_input(void)
 }
 
 void
-expire_timer(uintptr_t id)
+expire_timer(struct kevent *kev)
 {
-	bool timer_ok = true;
-	char *timer_name;
+	struct dns_data *data;
+	time_t now;
+	char expired_at[26];
 
-	switch (id) {
-	case RDNSS_TIMER_ID:
-		timer_name = "RDNSS";
-		rdnss_ltime = 0;
-		clear_radns_list(&rdnss_list);
-		break;
-	case DNSSL_TIMER_ID:
-		timer_name = "DNSSL";
-		dnssl_ltime = 0;
-		clear_radns_list(&dnssl_list);
-		break;
-	default:
-		timer_name = "UNKNOWN";
-		timer_ok = false;
+	data = kev->udata;
+	time(&now);
+	format_timestamp(expired_at, sizeof(expired_at), &now);
+	log_msg(LOG_INFO, __func__, "timer %u for %s expired at %s",
+	    data->timer_id, data->str, expired_at);
+	TAILQ_REMOVE(data->timer_type == RDNSS_TIMER ? &rdnss_list : &dnssl_list,
+	    data, entries);
+	write_resolv_conf(ifname);
+}
+
+size_t
+get_max_width(struct radns_list_t *list, size_t max)
+{
+	size_t cur;
+	struct dns_data *data;
+
+	TAILQ_FOREACH(data, list, entries) {
+		cur = strlen(data->str);
+		if (cur > max)
+			max = cur;
 	}
 
-	log_msg(LOG_INFO, __func__, "%s: expired: %u", timer_name, time(NULL));
-	if (timer_ok)
-		write_resolv_conf(ifname);
+	return max;
+}
+
+void
+dump_state(void)
+{
+	size_t max;
+	struct dns_data *data;
+	char fmt[16];
+
+	max = get_max_width(&rdnss_list, 0);
+	max = get_max_width(&dnssl_list, max);
+	snprintf(fmt, sizeof(fmt), "%%-%lus  %%s", max);
+	log_msg(LOG_ERR, __func__, "servers:");
+	TAILQ_FOREACH(data, &rdnss_list, entries)
+	     log_msg(LOG_NOTICE, __func__, fmt, data->str, data->expiry);
+	log_msg(LOG_ERR, __func__, "domains:");
+	TAILQ_FOREACH(data, &dnssl_list, entries)
+	    log_msg(LOG_NOTICE, __func__, fmt, data->str, data->expiry);
 }
 
 int
 main(int argc, char *argv[])
 {
-	struct kevent	event[3];
-	int		ch, kq, s, nev, i;
+	struct kevent	event;
+	int		ch, kq, s, nev;
 	const char	*opts;
 
 	opts = "dfh";
@@ -460,6 +589,8 @@ main(int argc, char *argv[])
 			setlogmask(LOG_UPTO(log_upto));
 	}
 
+	signal(SIGUSR1, SIG_IGN);
+
 	if (!fflag)
 		daemon(0, 0);
 
@@ -473,24 +604,31 @@ main(int argc, char *argv[])
 
 	log_msg(LOG_NOTICE, __func__, "started%s", dflag ? " (debug output)" : "");
 
-	changelist_set_listen_sock(&changelist, s);
+	changelist_init(&changelist, s);
 	for (;;) {
-		nev = kevent(kq, changelist.event, changelist.count, event, COUNT_OF(event), NULL);
-		changelist_reset(&changelist);
+		nev = changelist_event_listen(kq, &changelist, &event);
 		if (nev < 0) {
 			log_msg(LOG_ERR, __func__, "kevent: %s", strerror(errno));
 			exit(EXIT_FAILURE);
 		} else {
-			for (i = 0; i < nev; i++) {
-				if (event[i].flags & EV_ERROR) {
-					log_msg(LOG_ERR, "EV_ERROR: %s for %lu\n",
-						strerror(event[i].data), event[i].ident);
-					exit(EXIT_FAILURE);
-				} else {
-					if (event[i].ident == (uintptr_t) s)
-						sock_input();
-					else if (event[i].filter == EVFILT_TIMER)
-						expire_timer(event[i].ident);
+			if (event.flags & EV_ERROR) {
+				log_msg(LOG_ERR, __func__, "EV_ERROR: %s for %lu",
+				    strerror(event.data), event.ident);
+				exit(EXIT_FAILURE);
+			} else {
+				switch (event.filter) {
+				case EVFILT_READ:
+					sock_input();
+					break;
+				case EVFILT_TIMER:
+					expire_timer(&event);
+					break;
+				case EVFILT_SIGNAL:
+					dump_state();
+					break;
+				default:
+					log_msg(LOG_WARNING, __func__, "unhandled event type: %d",
+					    event.filter);
 				}
 			}
 		}

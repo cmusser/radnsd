@@ -1,4 +1,3 @@
-CC=gcc
 CFLAGS=-Wall
 PREFIX?=/usr/local
 
