@@ -176,7 +176,7 @@ changelist_set_timer(struct event_changelist *list, struct dns_data *data, intpt
 		    : (EV_ADD | EV_ENABLE | EV_ONESHOT),
 		    0, timeout, data);
 		TAILQ_INSERT_TAIL(&list->events, change, entries);
-		log_msg(LOG_NOTICE, __func__, "%s timer %lu for %s",
+		log_msg(LOG_INFO, __func__, "%s timer %lu for %s",
 		    (timeout == DELETE_TIMER) ? "delete" : "add",
 		    change->kev.ident, data->str);
 	}
