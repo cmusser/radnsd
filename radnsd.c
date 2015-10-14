@@ -176,7 +176,7 @@ changelist_set_timer(struct event_changelist *list, struct dns_data *data, intpt
 		    : (EV_ADD | EV_ENABLE | EV_ONESHOT),
 		    0, timeout, data);
 		TAILQ_INSERT_TAIL(&list->events, change, entries);
-		log_msg(LOG_NOTICE, __func__, "%s timer %lu %s",
+		log_msg(LOG_NOTICE, __func__, "%s timer %lu for %s",
 		    (timeout == DELETE_TIMER) ? "delete" : "add",
 		    change->kev.ident, data->str);
 	}
@@ -359,6 +359,7 @@ handle_dns_data(enum timer_type type, char *str, char *expiry_str, uintptr_t lti
 			    data, entries);
 		else {
 			data->timer_id = ++changelist.cur_timer_id;
+			strlcpy(data->expiry, expiry_str, sizeof(data->expiry));
 			changelist_set_timer(&changelist, data, ltime);
 		}
 	}
@@ -568,17 +569,19 @@ dump_state(void)
 {
 	size_t max;
 	struct dns_data *data;
-	char fmt[16];
+	char fmt[64];
 
 	max = get_max_width(&rdnss_list, 0);
 	max = get_max_width(&dnssl_list, max);
-	snprintf(fmt, sizeof(fmt), "%%-%lus  %%s", max);
+	snprintf(fmt, sizeof(fmt), "%%-%lus  %%s (timer %%lu)", max);
 	log_msg(LOG_NOTICE, __func__, "servers:");
 	TAILQ_FOREACH(data, &rdnss_list, entries)
-	     log_msg(LOG_NOTICE, __func__, fmt, data->str, data->expiry);
+	    log_msg(LOG_NOTICE, __func__, fmt, data->str, data->expiry,
+		    data->timer_id);
 	log_msg(LOG_ERR, __func__, "domains:");
 	TAILQ_FOREACH(data, &dnssl_list, entries)
-	    log_msg(LOG_NOTICE, __func__, fmt, data->str, data->expiry);
+	    log_msg(LOG_NOTICE, __func__, fmt, data->str, data->expiry,
+		    data->timer_id);
 }
 
 int
