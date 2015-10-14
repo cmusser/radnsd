@@ -88,7 +88,7 @@ static struct sockaddr_in6 from;
 char		ifname[IFNAMSIZ];
 
 void		usage(void);
-void		log_msg   (int priority, const char *func, const char *msg,...);
+void		log_msg   (int priority, const char *msg,...);
 struct dns_data  *find_radns_by_str(struct radns_list_t *list, char *str);
 void		changelist_init(struct event_changelist *list, int s);
 bool		changelist_set_timer(struct event_changelist *list, struct dns_data *data, intptr_t timeout);
@@ -111,10 +111,9 @@ usage(void)
 }
 
 void
-log_msg(int priority, const char *func, const char *msg,...)
+log_msg(int priority, const char *msg,...)
 {
 	va_list		ap;
-	char		buf       [BUFSIZ];
 
 	va_start(ap, msg);
 	if (fflag) {
@@ -123,8 +122,6 @@ log_msg(int priority, const char *func, const char *msg,...)
 			fprintf(stderr, "\n");
 		}
 	} else {
-		snprintf(buf, sizeof(buf), "<%s> %s", func, msg);
-		msg = buf;
 		vsyslog(priority, msg, ap);
 	}
 	va_end(ap);
@@ -167,7 +164,7 @@ changelist_set_timer(struct event_changelist *list, struct dns_data *data, intpt
 
 	change = calloc(sizeof(struct change_kev), 1);
 	if (change == NULL) {
-		log_msg(LOG_ERR, __func__, "malloc for timer change event failed");
+		log_msg(LOG_ERR, "malloc for timer change event failed");
 		rv = false;
 	} else {
 		list->count++;
@@ -176,7 +173,7 @@ changelist_set_timer(struct event_changelist *list, struct dns_data *data, intpt
 		    : (EV_ADD | EV_ENABLE | EV_ONESHOT),
 		    0, timeout, data);
 		TAILQ_INSERT_TAIL(&list->events, change, entries);
-		log_msg(LOG_INFO, __func__, "%s timer %lu for %s",
+		log_msg(LOG_INFO, "%s timer %lu for %s",
 		    (timeout == DELETE_TIMER) ? "delete" : "add",
 		    change->kev.ident, data->str);
 	}
@@ -193,7 +190,7 @@ changelist_event_listen(int kq, struct event_changelist *list, struct kevent *ev
 	changes = calloc(sizeof(struct kevent), list->count);
 	if (changes == NULL) {
 		nev = 0;
-		log_msg(LOG_ERR, __func__, "malloc for kevent array failed");
+		log_msg(LOG_ERR, "malloc for kevent array failed");
 	} else {
 		i = 0;
 		TAILQ_FOREACH(change, &list->events, entries)
@@ -224,7 +221,7 @@ sockopen(void)
 	rcvcmsglen = CMSG_SPACE(sizeof(struct in6_pktinfo)) +
 		CMSG_SPACE(sizeof(int));
 	if (rcvcmsgbuf == NULL && (rcvcmsgbuf = malloc(rcvcmsglen)) == NULL) {
-		log_msg(LOG_ERR, __func__,
+		log_msg(LOG_ERR,
 			"malloc for receive msghdr failed");
 		return (-1);
 	}
@@ -233,19 +230,19 @@ sockopen(void)
 	sin6_allrouters.sin6_len = sizeof(sin6_allrouters);
 	if (inet_pton(AF_INET6, ALLROUTER,
 		      &sin6_allrouters.sin6_addr.s6_addr) != 1) {
-		log_msg(LOG_ERR, __func__, "inet_pton failed for %s",
+		log_msg(LOG_ERR, "inet_pton failed for %s",
 			ALLROUTER);
 		return (-1);
 	}
 	if ((rssock = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6)) < 0) {
-		log_msg(LOG_ERR, __func__, "socket: %s", strerror(errno));
+		log_msg(LOG_ERR, "socket: %s", strerror(errno));
 		return (-1);
 	}
 	/* Return receiving interface */
 	on = 1;
 	if (setsockopt(rssock, IPPROTO_IPV6, IPV6_RECVPKTINFO, &on,
 		       sizeof(on)) < 0) {
-		log_msg(LOG_ERR, __func__, "IPV6_RECVPKTINFO: %s",
+		log_msg(LOG_ERR, "IPV6_RECVPKTINFO: %s",
 			strerror(errno));
 		exit(1);
 	}
@@ -254,7 +251,7 @@ sockopen(void)
 	ICMP6_FILTER_SETPASS(ND_ROUTER_ADVERT, &filt);
 	if (setsockopt(rssock, IPPROTO_ICMPV6, ICMP6_FILTER, &filt,
 		       sizeof(filt)) == -1) {
-		log_msg(LOG_ERR, __func__, "setsockopt(ICMP6_FILTER): %s",
+		log_msg(LOG_ERR, "setsockopt(ICMP6_FILTER): %s",
 			strerror(errno));
 		return (-1);
 	}
@@ -322,7 +319,7 @@ get_expiry_values(intptr_t *ltime, char *expiry_str, size_t bufsz, uint32_t opt_
 	time(&expire_time);
 	expire_time += *ltime;
 	format_timestamp(expiry_str, bufsz, &expire_time);
-	log_msg(LOG_INFO, __func__, "%s option (lifetime: %u, expires %s)", desc, *ltime, expiry_str);
+	log_msg(LOG_INFO, "%s option (lifetime: %u, expires %s)", desc, *ltime, expiry_str);
 	*ltime *= 1000;
 }
 
@@ -349,7 +346,7 @@ handle_dns_data(enum timer_type type, char *str, char *expiry_str, uintptr_t lti
 				    data, entries);
 				changelist_set_timer(&changelist, data, ltime);
 			} else {
-				log_msg(LOG_ERR, __func__, "failed to allocate storage for \"%s\"", str);
+				log_msg(LOG_ERR, "failed to allocate storage for \"%s\"", str);
 			}
 		}
 	} else { /* Updated data */
@@ -371,20 +368,20 @@ validate_label(uint8_t *label, uint8_t len)
 	uint8_t *end;
 
 	if (!isalpha(*label)) {
-		log_msg(LOG_ERR, __func__, "first char in label (\"%c\") not a letter", *label);
+		log_msg(LOG_ERR, "first char in label (\"%c\") not a letter", *label);
 		return(false);
 	}
 
 	end = label + len - 1;
 	for (label++; label < end; label++)
 		if (!(isalpha(*label) || isdigit(*label) || *label == '-')) {
-			log_msg(LOG_ERR, __func__, "interior char in label (\"%c\") "
+			log_msg(LOG_ERR, "interior char in label (\"%c\") "
 			    "not a letter, digit or hyphen", *label);
 			return false;
 		}
 
 	if (!(isalpha(*label) || isdigit(*label))) {
-		log_msg(LOG_ERR, __func__, "interior char in label (\"%c\") "
+		log_msg(LOG_ERR, "interior char in label (\"%c\") "
 		    "not a letter or digit", *label);
 		return false;
 	}
@@ -450,7 +447,7 @@ process_dnssl_opt(uint16_t ra_ltime, struct nd_opt_dnssl *dnssl)
 				}
 			}
 		} else {
-			log_msg(LOG_ERR, __func__, "label (%d) or domain too long, skipping", *cur_in);
+			log_msg(LOG_ERR, "label (%d) or domain too long, skipping", *cur_in);
 		}
 		do {
 			cur_in++;
@@ -474,7 +471,7 @@ sock_input(void)
 	struct in6_pktinfo *pi = NULL;
 
 	if ((i = recvmsg(rssock, &rcvmhdr, 0)) < 0) {
-		log_msg(LOG_ERR, __func__, "recvmsg: %s", strerror(errno));
+		log_msg(LOG_ERR, "recvmsg: %s", strerror(errno));
 		return;
 	}
 
@@ -482,7 +479,7 @@ sock_input(void)
 	ra_ltime = ntohs(ra->nd_ra_router_lifetime);
 	time(&now);
 	format_timestamp(now_str, sizeof(now_str),  &now);
-	log_msg(LOG_INFO, __func__, "RA received at %s (lifetime: %lu)",
+	log_msg(LOG_INFO, "RA received at %s (lifetime: %lu)",
 		now_str, ra_ltime);
 
 	end = rcviov[0].iov_base + i;
@@ -505,7 +502,7 @@ sock_input(void)
 			process_dnssl_opt(ra_ltime, (struct nd_opt_dnssl *)opt);
 			break;
 		default:
-			log_msg(LOG_WARNING, __func__, "unrecognized message: %d",
+			log_msg(LOG_WARNING, "unrecognized message: %d",
 				opt->nd_opt_type);
 		}
 		cur += (opt->nd_opt_len * 8);
@@ -542,7 +539,7 @@ expire_timer(struct kevent *kev)
 	data = kev->udata;
 	time(&now);
 	format_timestamp(expired_at, sizeof(expired_at), &now);
-	log_msg(LOG_INFO, __func__, "timer %u for %s expired at %s",
+	log_msg(LOG_INFO, "timer %u for %s expired at %s",
 	    data->timer_id, data->str, expired_at);
 	TAILQ_REMOVE(data->timer_type == RDNSS_TIMER ? &rdnss_list : &dnssl_list,
 	    data, entries);
@@ -574,13 +571,13 @@ dump_state(void)
 	max = get_max_width(&rdnss_list, 0);
 	max = get_max_width(&dnssl_list, max);
 	snprintf(fmt, sizeof(fmt), "%%-%lus  %%s (timer %%lu)", max);
-	log_msg(LOG_NOTICE, __func__, "servers:");
+	log_msg(LOG_NOTICE, "servers:");
 	TAILQ_FOREACH(data, &rdnss_list, entries)
-	    log_msg(LOG_NOTICE, __func__, fmt, data->str, data->expiry,
+	    log_msg(LOG_NOTICE, fmt, data->str, data->expiry,
 		    data->timer_id);
-	log_msg(LOG_ERR, __func__, "domains:");
+	log_msg(LOG_ERR, "domains:");
 	TAILQ_FOREACH(data, &dnssl_list, entries)
-	    log_msg(LOG_NOTICE, __func__, fmt, data->str, data->expiry,
+	    log_msg(LOG_NOTICE, fmt, data->str, data->expiry,
 		    data->timer_id);
 }
 
@@ -629,24 +626,24 @@ main(int argc, char *argv[])
 		daemon(0, 0);
 
 	if ((kq = kqueue()) == -1) {
-		log_msg(LOG_ERR, __func__, "kqueue(): %s", strerror(errno));
+		log_msg(LOG_ERR, "kqueue(): %s", strerror(errno));
 		exit(EXIT_FAILURE);
 	}
 
 	if ((s = sockopen()) < 0)
 		exit(EXIT_FAILURE);
 
-	log_msg(LOG_NOTICE, __func__, "started%s", dflag ? " (debug output)" : "");
+	log_msg(LOG_NOTICE, "started%s", dflag ? " (debug output)" : "");
 
 	changelist_init(&changelist, s);
 	for (;;) {
 		nev = changelist_event_listen(kq, &changelist, &event);
 		if (nev < 0) {
-			log_msg(LOG_ERR, __func__, "kevent: %s", strerror(errno));
+			log_msg(LOG_ERR, "kevent: %s", strerror(errno));
 			exit(EXIT_FAILURE);
 		} else {
 			if (event.flags & EV_ERROR) {
-				log_msg(LOG_ERR, __func__, "EV_ERROR: %s for %lu",
+				log_msg(LOG_ERR, "EV_ERROR: %s for %lu",
 				    strerror(event.data), event.ident);
 				exit(EXIT_FAILURE);
 			} else {
@@ -661,7 +658,7 @@ main(int argc, char *argv[])
 					dump_state();
 					break;
 				default:
-					log_msg(LOG_WARNING, __func__, "unhandled event type: %d",
+					log_msg(LOG_WARNING, "unhandled event type: %d",
 					    event.filter);
 				}
 			}
