@@ -11,6 +11,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <resolv.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -32,22 +33,22 @@
 #define DNS_STR_MAX 256
 #define DATE_MAX 26
 
-typedef enum timer_type {
-	RDNSS_TIMER = 0,
-	DNSSL_TIMER = 1
-} timer_type;
+#define PID_FILE "/var/run/radnsd.pid"
+#define RESOLVCONF_FILE "/etc/resolv.conf"
 
 struct dns_data {
-	timer_type	timer_type; /* used to select list in which to search for this element */
+	u_int8_t		type; /* used to select list in which to search for this element */
 	uintptr_t	timer_id;   /* current timer. Deleted and replaced when update arrives */
 	char		str       [DNS_STR_MAX]; /* domain name or server address */
-	char		expiry[DATE_MAX]; /* For display */
+	time_t		expiry;
 			TAILQ_ENTRY   (dns_data) entries;
 };
 
-TAILQ_HEAD(radns_list_t, dns_data);
-struct radns_list_t rdnss_list = TAILQ_HEAD_INITIALIZER(rdnss_list);
-struct radns_list_t dnssl_list = TAILQ_HEAD_INITIALIZER(dnssl_list);
+TAILQ_HEAD(radns_list, dns_data);
+struct radns_list rdnss_cur = TAILQ_HEAD_INITIALIZER(rdnss_cur);
+struct radns_list rdnss_new = TAILQ_HEAD_INITIALIZER(rdnss_new);
+struct radns_list dnssl_cur = TAILQ_HEAD_INITIALIZER(dnssl_cur);
+struct radns_list dnssl_new = TAILQ_HEAD_INITIALIZER(dnssl_new);
 
 struct change_kev {
 	struct kevent kev;
@@ -89,18 +90,22 @@ char		ifname[IFNAMSIZ];
 
 void		usage(void);
 void		log_msg   (int priority, const char *msg,...);
-struct dns_data  *find_radns_by_str(struct radns_list_t *list, char *str);
 void		changelist_init(struct event_changelist *list, int s);
 bool		changelist_set_timer(struct event_changelist *list, struct dns_data *data, intptr_t timeout);
 int		changelist_event_listen(int kq, struct event_changelist *list, struct kevent *event);
 int		sockopen   (void);
-bool		validate_label(uint8_t *label, uint8_t len);
-void		process_rdnss_opt(uint16_t ra_ltime, struct nd_opt_rdnss *rdnss_p);
-void		process_dnssl_opt(uint16_t ra_ltime, struct nd_opt_dnssl *dnssl_p);
+void		format_timestamp(char *time_str, size_t bufsz, time_t time);
+void		get_expiry_values(struct nd_router_advert *ra, 	struct nd_opt_hdr *opt,
+    intptr_t *ltime, time_t *expiry);
+void		handle_dns_data(u_int8_t type, char *str, time_t expiry, uintptr_t ltime);
+void		prepend_new_dns_data(u_int8_t type);
+bool		validate_label(u_int8_t *label, u_int8_t len);
+void		process_rdnss_opt(struct nd_router_advert *ra, struct nd_opt_hdr *opt);
+void		process_dnssl_opt(struct nd_router_advert *ra, struct nd_opt_hdr *opt);
 void		sock_input (void);
 void		write_resolv_conf(char *ifname);
 void		expire_timer(struct kevent *kev);
-size_t		get_max_width(struct radns_list_t *list, size_t max);
+size_t		get_max_width(struct radns_list *list, size_t max);
 void		dump_state(void);
 
 void
@@ -125,19 +130,6 @@ log_msg(int priority, const char *msg,...)
 		vsyslog(priority, msg, ap);
 	}
 	va_end(ap);
-}
-
-struct dns_data *
-find_radns_by_str(struct radns_list_t *list, char *str)
-{
-	struct dns_data *cur;
-
-	TAILQ_FOREACH(cur, list, entries) {
-		if (strcmp(cur->str, str) == 0)
-			return cur;
-	}
-
-	return NULL;
 }
 
 void
@@ -173,7 +165,7 @@ changelist_set_timer(struct event_changelist *list, struct dns_data *data, intpt
 		    : (EV_ADD | EV_ENABLE | EV_ONESHOT),
 		    0, timeout, data);
 		TAILQ_INSERT_TAIL(&list->events, change, entries);
-		log_msg(LOG_INFO, "%s timer %lu for %s",
+		log_msg(LOG_DEBUG, "%s timer %lu for %s",
 		    (timeout == DELETE_TIMER) ? "delete" : "add",
 		    change->kev.ident, data->str);
 	}
@@ -276,10 +268,10 @@ write_resolv_conf(char *ifname)
 	bool		has_dnssl = false;
 	char		dnssl     [DNS_STR_MAX] = {'\0'};
 
-	resolv_conf = fopen("/etc/resolv.conf", "w");
+	resolv_conf = fopen(RESOLVCONF_FILE, "w");
 	if (resolv_conf != NULL) {
 		fprintf(resolv_conf, "# from %s (RA)\n", ifname);
-		TAILQ_FOREACH(cur, &dnssl_list, entries) {
+		TAILQ_FOREACH(cur, &dnssl_cur, entries) {
 			if (!has_dnssl) {
 				has_dnssl = true;
 				strlcpy(dnssl, "search", sizeof(dnssl));
@@ -289,48 +281,71 @@ write_resolv_conf(char *ifname)
 		}
 		fprintf(resolv_conf, "%s\n", dnssl);
 
-		TAILQ_FOREACH(cur, &rdnss_list, entries)
+		TAILQ_FOREACH(cur, &rdnss_cur, entries)
 			fprintf(resolv_conf, "nameserver %s\n", cur->str);
 
 		fclose(resolv_conf);
+	} else {
+		log_msg(LOG_ERR, "fopen() for %s failed %s", RESOLVCONF_FILE,
+		    strerror(errno));
 	}
 }
 
 void
-format_timestamp(char *time_str, size_t bufsz, time_t *time)
+format_timestamp(char *time_str, size_t bufsz, time_t time)
 {
 	struct tm time_tm;
 
-	localtime_r(time, &time_tm);
+	localtime_r(&time, &time_tm);
 	strftime(time_str, bufsz, "%c", &time_tm);
 }
 
-
 void
-get_expiry_values(intptr_t *ltime, char *expiry_str, size_t bufsz, uint32_t opt_ltime,
-    uint16_t ra_ltime, char *desc)
+get_expiry_values(struct nd_router_advert *ra, 	struct nd_opt_hdr *opt,
+    intptr_t *ltime, time_t *expiry)
 {
-	time_t expire_time;
+	char *desc;
+	u_int16_t ra_ltime;
+	char expiry_str[DATE_MAX];
 
-	*ltime = (intptr_t) ntohl(opt_ltime);
+	if (opt->nd_opt_type == ND_OPT_RDNSS) {
+		desc = "RDNSS";
+		*ltime = (intptr_t) ntohl(((struct nd_opt_rdnss *)opt)->nd_opt_rdnss_lifetime);
+	} else {
+		desc = "DNSSL";
+		*ltime = (intptr_t) ntohl(((struct nd_opt_dnssl *)opt)->nd_opt_dnssl_lifetime);
+	}
+	/* The option lifetime is limited by the lifetime of the enclosing RA.
+	*/
+	ra_ltime = ntohs(ra->nd_ra_router_lifetime);
 	if (ra_ltime < *ltime)
 		*ltime = ra_ltime;
 
-	time(&expire_time);
-	expire_time += *ltime;
-	format_timestamp(expiry_str, bufsz, &expire_time);
-	log_msg(LOG_INFO, "%s option (lifetime: %u, expires %s)", desc, *ltime, expiry_str);
+	/* The expiration is in the future. */
+	time(expiry);
+	*expiry += *ltime;
+
+	/* ltime is used to set the timer. Must be in milliseconds. */
+	format_timestamp(expiry_str, sizeof(expiry_str), *expiry);
+	log_msg(LOG_INFO, "%s option (lifetime: %u, expires %s)",
+	    desc, *ltime, expiry_str);
 	*ltime *= 1000;
 }
 
 void
-handle_dns_data(enum timer_type type, char *str, char *expiry_str, uintptr_t ltime)
+handle_dns_data(u_int8_t type, char *str, time_t expiry, uintptr_t ltime)
 {
-	struct radns_list_t *list;
-	struct dns_data *data;
+	struct radns_list *list, *list_new;
+	struct dns_data *data, *cur;
 
-	list = (type == RDNSS_TIMER) ? &rdnss_list : &dnssl_list;
-	data = find_radns_by_str(list, str);
+	list = (type == ND_OPT_RDNSS) ? &rdnss_cur : &dnssl_cur;
+	list_new = (type == ND_OPT_RDNSS) ? &rdnss_new : &dnssl_new;
+
+	data = NULL;
+	TAILQ_FOREACH(cur, list, entries) {
+		if (strcmp(cur->str, str) == 0)
+			data = cur;
+	}
 
 	if (data == NULL) { /* New data */
 		/* Server may send new entries with 0 lifetime. These
@@ -338,12 +353,11 @@ handle_dns_data(enum timer_type type, char *str, char *expiry_str, uintptr_t lti
 		if (ltime != 0) {
 			data = malloc(sizeof(struct dns_data));
 			if (data != NULL) {
-				data->timer_type = type;
+				data->type = type;
 				data->timer_id = ++changelist.cur_timer_id;
 				strlcpy(data->str, str, sizeof(data->str));
-				strlcpy(data->expiry, expiry_str, sizeof(data->expiry));
-				TAILQ_INSERT_TAIL((type == RDNSS_TIMER) ? &rdnss_list : &dnssl_list,
-				    data, entries);
+				data->expiry = expiry;
+				TAILQ_INSERT_TAIL(list_new, data, entries);
 				changelist_set_timer(&changelist, data, ltime);
 			} else {
 				log_msg(LOG_ERR, "failed to allocate storage for \"%s\"", str);
@@ -351,83 +365,128 @@ handle_dns_data(enum timer_type type, char *str, char *expiry_str, uintptr_t lti
 		}
 	} else { /* Updated data */
 		changelist_set_timer(&changelist, data, DELETE_TIMER);
-		if (ltime == 0)
-			TAILQ_REMOVE((type == RDNSS_TIMER) ? &rdnss_list : &dnssl_list,
-			    data, entries);
-		else {
+		if (ltime == 0) {
+			TAILQ_REMOVE(list, data, entries);
+			free(data);
+		} else {
 			data->timer_id = ++changelist.cur_timer_id;
-			strlcpy(data->expiry, expiry_str, sizeof(data->expiry));
+			data->expiry = expiry;
 			changelist_set_timer(&changelist, data, ltime);
 		}
 	}
 }
 
-bool
-validate_label(uint8_t *label, uint8_t len)
+/* This function ensures that new entries are inserted in the order they
+   appeared in the message, but appear at the top of the list and also
+   limits the number of entries in each list in accordance with sections
+   6.2 and 6.3 of RFC 6106. In practice, servers seem to send 0 lifetime
+   messages for everything on configuration change, so it's unlikely that
+   the lists in this process will contain items that are new followed by
+   older items, even if the server sends more than one of a given option
+   type in a message.
+*/
+void
+prepend_new_dns_data(u_int8_t type)
 {
-	uint8_t *end;
+        struct dns_data *data, *data_tmp, *cur, *expires_first;
+        struct radns_list *list, *list_new;
+	int count, max;
+
+        list = (type == ND_OPT_RDNSS) ? &rdnss_cur : &dnssl_cur;
+        list_new = (type == ND_OPT_RDNSS) ? &rdnss_new : &dnssl_new;
+	max =  (type == ND_OPT_RDNSS) ? MAXNS : MAXDNSRCH;
+
+        TAILQ_FOREACH_REVERSE_MUTABLE(data, list_new, radns_list, entries, data_tmp) {
+                TAILQ_REMOVE(list_new, data, entries);
+
+		count = 0;
+		expires_first = NULL;
+		TAILQ_FOREACH(cur, list, entries) {
+			count++;
+			if (expires_first == NULL || expires_first->expiry < cur->expiry)
+				expires_first = cur;
+		}
+		if (count == max) {
+			log_msg(LOG_INFO, "evicting %s", expires_first->str);
+			changelist_set_timer(&changelist, expires_first, DELETE_TIMER);
+			TAILQ_REMOVE(list, expires_first, entries);
+			free(expires_first);
+		}
+
+                TAILQ_INSERT_HEAD(list, data, entries);
+        }
+}
+
+bool
+validate_label(u_int8_t *label, u_int8_t len)
+{
+	u_int8_t *end;
 
 	if (!isalpha(*label)) {
 		log_msg(LOG_ERR, "first char in label (\"%c\") not a letter", *label);
 		return(false);
 	}
 
-	end = label + len - 1;
-	for (label++; label < end; label++)
-		if (!(isalpha(*label) || isdigit(*label) || *label == '-')) {
+	if (len > 1) {
+		end = label + len - 1;
+		for (label++; label < end; label++)
+			if (!(isalpha(*label) || isdigit(*label) || *label == '-')) {
+				log_msg(LOG_ERR, "interior char in label (\"%c\") "
+				    "not a letter, digit or hyphen", *label);
+				return false;
+			}
+
+		if (!(isalpha(*label) || isdigit(*label))) {
 			log_msg(LOG_ERR, "interior char in label (\"%c\") "
-			    "not a letter, digit or hyphen", *label);
+			    "not a letter or digit", *label);
 			return false;
 		}
-
-	if (!(isalpha(*label) || isdigit(*label))) {
-		log_msg(LOG_ERR, "interior char in label (\"%c\") "
-		    "not a letter or digit", *label);
-		return false;
 	}
 
 	return true;
 }
 
 void
-process_rdnss_opt(uint16_t ra_ltime, struct nd_opt_rdnss *rdnss)
+process_rdnss_opt(struct nd_router_advert *ra, struct nd_opt_hdr *opt)
 {
 
 	intptr_t	ltime;
-	char            expiry_str[DATE_MAX];
-	uint8_t		i;
+	time_t		expiry;
+	struct nd_opt_rdnss *rdnss;
+	u_int8_t		i;
 	struct in6_addr *cur_addr_p;
 	char            v6addr[INET6_ADDRSTRLEN];
 
-	get_expiry_values(&ltime, expiry_str, sizeof(expiry_str),
-	    rdnss->nd_opt_rdnss_lifetime, ra_ltime, "RDNSS");
+	get_expiry_values(ra, opt, &ltime, &expiry);
 
+	rdnss = (struct nd_opt_rdnss *)opt;
 	for (cur_addr_p = (struct in6_addr *)(rdnss + 1), i = 0;
 	     i < ADDRCOUNT(rdnss);
 	     i++, cur_addr_p++) {
 		inet_ntop(AF_INET6, cur_addr_p, v6addr, sizeof(v6addr));
-		handle_dns_data(RDNSS_TIMER, v6addr, expiry_str, ltime);
+		handle_dns_data(opt->nd_opt_type, v6addr, expiry, ltime);
 	}
 }
 
 void
-process_dnssl_opt(uint16_t ra_ltime, struct nd_opt_dnssl *dnssl)
+process_dnssl_opt(struct nd_router_advert *ra, struct nd_opt_hdr *opt)
 {
 	intptr_t	ltime;
-	char            expiry_str[DATE_MAX];
-	uint8_t		*cur_in, *in_buf_end;
+	time_t		expiry;
+	struct nd_opt_dnssl *dnssl;
+	u_int8_t		*cur_in, *in_buf_end;
 	char		domain    [DOMAIN_MAX] = {'\0'};
 	char		*cur_out, *domain_end;
 
-	get_expiry_values(&ltime, expiry_str, sizeof(expiry_str),
-	    dnssl->nd_opt_dnssl_lifetime, ra_ltime, "DNSSL");
+	get_expiry_values(ra, opt, &ltime, &expiry);
 
-	cur_in = (uint8_t *) (dnssl + 1);
-	in_buf_end = (uint8_t *)(dnssl + (dnssl->nd_opt_dnssl_len * 8));
+	dnssl = (struct nd_opt_dnssl *)opt;
+	cur_in = (u_int8_t *) (dnssl + 1);
+	in_buf_end = (u_int8_t *)(dnssl + (dnssl->nd_opt_dnssl_len * 8));
 	cur_out = domain;
 	domain_end = domain + sizeof(domain) - 1;
 
-	while (*cur_in != '\0' && cur_in <= in_buf_end) {
+	while (*cur_in != '\0' && cur_in <= in_buf_end)  {
 		if (*cur_in <= LABEL_MAX && (cur_out + *cur_in) < (domain_end - 1)) {
 			if (validate_label(cur_in + 1, *cur_in)) {
 				memcpy(cur_out, cur_in + 1, *cur_in);
@@ -435,7 +494,7 @@ process_dnssl_opt(uint16_t ra_ltime, struct nd_opt_dnssl *dnssl)
 				cur_in += (*cur_in + 1);
 
 				if (*cur_in == '\0') { // Last label, create a DNSSL entry
-					handle_dns_data(DNSSL_TIMER, domain, expiry_str, ltime);
+					handle_dns_data(opt->nd_opt_type, domain, expiry, ltime);
 					bzero(domain, sizeof(domain));
 					cur_out = domain;
 					cur_in++;
@@ -461,7 +520,6 @@ sock_input(void)
 {
  	int		i;
 	struct nd_router_advert *ra;
-	uint16_t	ra_ltime;
 	time_t		now;
 	char		now_str[DATE_MAX];
 	char           *cur, *end;
@@ -469,6 +527,7 @@ sock_input(void)
 	int ifindex = 0;
 	struct cmsghdr *cm;
 	struct in6_pktinfo *pi = NULL;
+	u_int8_t opt_len;
 
 	if ((i = recvmsg(rssock, &rcvmhdr, 0)) < 0) {
 		log_msg(LOG_ERR, "recvmsg: %s", strerror(errno));
@@ -476,11 +535,10 @@ sock_input(void)
 	}
 
 	ra = rcviov[0].iov_base;
-	ra_ltime = ntohs(ra->nd_ra_router_lifetime);
 	time(&now);
-	format_timestamp(now_str, sizeof(now_str),  &now);
+	format_timestamp(now_str, sizeof(now_str), now);
 	log_msg(LOG_INFO, "RA received at %s (lifetime: %lu)",
-		now_str, ra_ltime);
+		now_str, ntohs(ra->nd_ra_router_lifetime));
 
 	end = rcviov[0].iov_base + i;
 	cur = (char *)(ra + 1);
@@ -496,17 +554,27 @@ sock_input(void)
 			//Recognized, but not relevant
 			break;
 		case ND_OPT_RDNSS:
-			process_rdnss_opt(ra_ltime, (struct nd_opt_rdnss *)opt);
+			process_rdnss_opt(ra, opt);
 			break;
 		case ND_OPT_DNSSL:
-			process_dnssl_opt(ra_ltime, (struct nd_opt_dnssl *)opt);
+			process_dnssl_opt(ra, opt);
 			break;
 		default:
 			log_msg(LOG_WARNING, "unrecognized message: %d",
 				opt->nd_opt_type);
 		}
-		cur += (opt->nd_opt_len * 8);
+		opt_len = opt->nd_opt_len * 8;
+		if (opt_len > 0)
+			cur += opt_len;
+		else {
+			/* Don't spin in place. Zero length options are invalid. */
+			log_msg(LOG_WARNING, "stopping at zero-length option");
+			break;
+		}
 	}
+
+	prepend_new_dns_data(ND_OPT_RDNSS);
+	prepend_new_dns_data(ND_OPT_DNSSL);
 
 	for (cm = (struct cmsghdr *)CMSG_FIRSTHDR(&rcvmhdr);
 	     cm;
@@ -538,16 +606,17 @@ expire_timer(struct kevent *kev)
 
 	data = kev->udata;
 	time(&now);
-	format_timestamp(expired_at, sizeof(expired_at), &now);
+	format_timestamp(expired_at, sizeof(expired_at), now);
 	log_msg(LOG_INFO, "timer %u for %s expired at %s",
 	    data->timer_id, data->str, expired_at);
-	TAILQ_REMOVE(data->timer_type == RDNSS_TIMER ? &rdnss_list : &dnssl_list,
+	TAILQ_REMOVE(data->type == ND_OPT_RDNSS ? &rdnss_cur : &dnssl_cur,
 	    data, entries);
+	free(data);
 	write_resolv_conf(ifname);
 }
 
 size_t
-get_max_width(struct radns_list_t *list, size_t max)
+get_max_width(struct radns_list *list, size_t max)
 {
 	size_t cur;
 	struct dns_data *data;
@@ -567,18 +636,22 @@ dump_state(void)
 	size_t max;
 	struct dns_data *data;
 	char fmt[64];
+	char expiry_str[DATE_MAX];
 
-	max = get_max_width(&rdnss_list, 0);
-	max = get_max_width(&dnssl_list, max);
-	snprintf(fmt, sizeof(fmt), "%%-%lus  %%s (timer %%lu)", max);
+	max = get_max_width(&rdnss_cur, 0);
+	max = get_max_width(&dnssl_cur, max);
+	snprintf(fmt, sizeof(fmt), "  %%-%lus  %%s (timer %%lu)", max);
 	log_msg(LOG_NOTICE, "servers:");
-	TAILQ_FOREACH(data, &rdnss_list, entries)
-	    log_msg(LOG_NOTICE, fmt, data->str, data->expiry,
-		    data->timer_id);
+	TAILQ_FOREACH(data, &rdnss_cur, entries) {
+		format_timestamp(expiry_str, sizeof(expiry_str), data->expiry);
+		log_msg(LOG_NOTICE, fmt, data->str, expiry_str, data->timer_id);
+	}
+
 	log_msg(LOG_ERR, "domains:");
-	TAILQ_FOREACH(data, &dnssl_list, entries)
-	    log_msg(LOG_NOTICE, fmt, data->str, data->expiry,
-		    data->timer_id);
+	TAILQ_FOREACH(data, &dnssl_cur, entries) {
+		format_timestamp(expiry_str, sizeof(expiry_str), data->expiry);
+		log_msg(LOG_NOTICE, fmt, data->str, expiry_str, data->timer_id);
+	}
 }
 
 int
@@ -587,6 +660,7 @@ main(int argc, char *argv[])
 	struct kevent	event;
 	int		ch, kq, s, nev;
 	const char	*opts;
+	FILE		*pid;
 
 	opts = "dfh";
 
@@ -596,7 +670,6 @@ main(int argc, char *argv[])
 			dflag = 1;
 			break;
 		case 'f':
-			dflag = 1;
 			fflag = 1;
 			break;
 		default:
@@ -632,6 +705,15 @@ main(int argc, char *argv[])
 
 	if ((s = sockopen()) < 0)
 		exit(EXIT_FAILURE);
+
+	pid = fopen(PID_FILE, "w");
+	if (pid != NULL) {
+		fprintf(pid, "%d\n", getpid());
+		fclose(pid);
+	} else {
+		log_msg(LOG_ERR, "fopen() for %s failed %s", PID_FILE, strerror(errno));
+		exit(EXIT_FAILURE);
+	}
 
 	log_msg(LOG_NOTICE, "started%s", dflag ? " (debug output)" : "");
 
