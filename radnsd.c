@@ -89,7 +89,7 @@ char		ifname    [IFNAMSIZ];
 void		usage     (void);
 void		log_msg   (int priority, const char *msg,...);
 void		changelist_init(int s);
-bool		changelist_set_timer(struct dns_data *data, intptr_t timeout_sec);
+bool		changelist_add_timer_kev(struct dns_data *data, intptr_t timeout_sec);
 int		changelist_event_listen(int kq, struct kevent *event);
 int		sockopen   (void);
 void		format_timestamp(char *time_str, size_t bufsz, time_t time);
@@ -147,9 +147,9 @@ changelist_init(int s)
 }
 
 bool
-changelist_set_timer(struct dns_data *data, intptr_t timeout_sec)
+changelist_add_timer_kev(struct dns_data *data, intptr_t timeout_sec)
 {
-	bool		rv = true;
+	bool		ok = true;
 	struct change_kev *change;
 	u_short		flags;
 	char           *desc;
@@ -157,7 +157,7 @@ changelist_set_timer(struct dns_data *data, intptr_t timeout_sec)
 	change = calloc(sizeof(struct change_kev), 1);
 	if (change == NULL) {
 		log_msg(LOG_ERR, "malloc for timer change event failed");
-		rv = false;
+		ok = false;
 	} else {
 		changelist_count++;
 		if (timeout_sec == DELETE_TIMER) {
@@ -174,7 +174,7 @@ changelist_set_timer(struct dns_data *data, intptr_t timeout_sec)
 			data->str);
 	}
 
-	return rv;
+	return ok;
 }
 
 int
@@ -370,21 +370,22 @@ handle_dns_data(u_int8_t type, char *str, uintptr_t ltime)
 				data->timer_id = ++changelist_cur_timer_id;
 				strlcpy(data->str, str, sizeof(data->str));
 				data->expiry = get_expiry(ltime);
-				TAILQ_INSERT_TAIL(list_new, data, entries);
-				changelist_set_timer(data, ltime);
+				if (changelist_add_timer_kev(data, ltime))
+					TAILQ_INSERT_TAIL(list_new, data, entries);
 			} else {
 				log_msg(LOG_ERR, "failed to allocate storage for \"%s\"", str);
 			}
 		}
 	} else {		/* Updated data */
-		changelist_set_timer(data, DELETE_TIMER);
-		if (ltime == 0) {
-			TAILQ_REMOVE(list, data, entries);
-			free(data);
-		} else {
-			data->timer_id = ++changelist_cur_timer_id;
-			data->expiry = get_expiry(ltime);
-			changelist_set_timer(data, ltime);
+		if (changelist_add_timer_kev(data, DELETE_TIMER)) {
+			if (ltime == 0) {
+				TAILQ_REMOVE(list, data, entries);
+				free(data);
+			} else {
+				data->timer_id = ++changelist_cur_timer_id;
+				data->expiry = get_expiry(ltime);
+				changelist_add_timer_kev(data, ltime);
+			}
 		}
 	}
 }
@@ -404,6 +405,7 @@ prepend_new_dns_data(u_int8_t type)
 	struct dns_data *data, *data_tmp, *cur, *expires_first;
 	struct radns_list *list, *list_new;
 	int		count     , max;
+	bool		ok = true;
 
 	list = (type == ND_OPT_RDNSS) ? &rdnss_cur : &dnssl_cur;
 	list_new = (type == ND_OPT_RDNSS) ? &rdnss_new : &dnssl_new;
@@ -411,7 +413,7 @@ prepend_new_dns_data(u_int8_t type)
 
 	TAILQ_FOREACH_REVERSE_MUTABLE(data, list_new, radns_list, entries, data_tmp) {
 		TAILQ_REMOVE(list_new, data, entries);
-
+		ok = true;
 		count = 0;
 		expires_first = NULL;
 		TAILQ_FOREACH(cur, list, entries) {
@@ -419,13 +421,17 @@ prepend_new_dns_data(u_int8_t type)
 			if (expires_first == NULL || expires_first->expiry < cur->expiry)
 				expires_first = cur;
 		}
+
 		if (count == max) {
-			log_msg(LOG_INFO, "evicting %s", expires_first->str);
-			changelist_set_timer(expires_first, DELETE_TIMER);
-			TAILQ_REMOVE(list, expires_first, entries);
-			free(expires_first);
+			ok = changelist_add_timer_kev(expires_first, DELETE_TIMER);
+			if (ok) {
+				log_msg(LOG_INFO, "evicting %s", expires_first->str);
+				TAILQ_REMOVE(list, expires_first, entries);
+				free(expires_first);
+			}
 		}
-		TAILQ_INSERT_HEAD(list, data, entries);
+		if (ok)
+			TAILQ_INSERT_HEAD(list, data, entries);
 	}
 }
 
