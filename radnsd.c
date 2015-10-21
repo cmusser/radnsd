@@ -415,7 +415,7 @@ prepend_new_dns_data(u_int8_t type)
 		expires_first = NULL;
 		TAILQ_FOREACH(cur, list, entries) {
 			count++;
-			if (expires_first == NULL || expires_first->expiry < cur->expiry)
+			if (expires_first == NULL || expires_first->expiry > cur->expiry)
 				expires_first = cur;
 		}
 
