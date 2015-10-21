@@ -62,6 +62,12 @@ struct change_kev {
 
 TAILQ_HEAD(change_kev_list, change_kev);
 
+struct event_changelist {
+	int		count;
+	uint32_t	cur_timer_id;
+	struct change_kev_list events;
+};
+
 #define ALLROUTER "ff02::2"
 static struct sockaddr_in6 sin6_allrouters = {
 	sizeof(sin6_allrouters),
@@ -78,9 +84,7 @@ static struct sockaddr_in6 sin6_allrouters = {
 
 struct radns_list servers = {ND_OPT_RDNSS, TAILQ_HEAD_INITIALIZER(servers.list), MAXNS, NULL};
 struct radns_list search_domains = {ND_OPT_DNSSL, TAILQ_HEAD_INITIALIZER(search_domains.list), MAXDNSRCH, NULL};
-int		changelist_count;
-uint32_t	changelist_cur_timer_id;
-struct change_kev_list changelist_events;
+struct event_changelist changelist = {0, 0, TAILQ_HEAD_INITIALIZER(changelist.events)};
 int		log_upto;
 bool		fflag = false;
 int		dflag = 0;
@@ -93,10 +97,9 @@ char		ifname    [IFNAMSIZ];
 
 void		usage     (void);
 void		log_msg   (int priority, const char *msg,...);
-void		changelist_init(int s);
+bool		changelist_add_socket_and_signal();
 bool		changelist_add_timer_kev(struct dns_data *data, intptr_t timeout_sec);
 int		changelist_event_listen(int kq, struct kevent *event);
-int		sockopen   (void);
 void		format_timestamp(char *time_str, size_t bufsz, time_t time);
 time_t		get_expiry(time_t ltime);
 time_t		get_ltime(struct nd_router_advert *ra, struct nd_opt_hdr *opt);
@@ -114,7 +117,7 @@ void		dump_state(void);
 void
 usage(void)
 {
-	fprintf(stderr, "usage: radnsd [-fdh]\n");
+	fprintf(stderr, "usage: radnsd [-fd]\n");
 	exit(EXIT_FAILURE);
 }
 
@@ -135,20 +138,76 @@ log_msg(int priority, const char *msg,...)
 	va_end(ap);
 }
 
-void
-changelist_init(int s)
+bool
+changelist_add_socket_and_signal()
 {
-	struct change_kev *change;
+	struct change_kev *socket_event, *signal_event;
+	int		on;
+	struct icmp6_filter filt;
+	int		rcvcmsglen;
+	static u_char  *rcvcmsgbuf = NULL;
 
-	changelist_cur_timer_id = 0;
-	TAILQ_INIT(&changelist_events);
-	changelist_count = 2;
-	change = calloc(sizeof(struct change_kev), 1);
-	EV_SET(&change->kev, s, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0);
-	TAILQ_INSERT_TAIL(&changelist_events, change, entries);
-	change = calloc(sizeof(struct change_kev), 1);
-	EV_SET(&change->kev, SIGUSR1, EVFILT_SIGNAL, EV_ADD | EV_ENABLE, 0, 0, 0);
-	TAILQ_INSERT_TAIL(&changelist_events, change, entries);
+	rcvcmsglen = CMSG_SPACE(sizeof(struct in6_pktinfo)) +
+		CMSG_SPACE(sizeof(int));
+	if (rcvcmsgbuf == NULL && (rcvcmsgbuf = malloc(rcvcmsglen)) == NULL) {
+		log_msg(LOG_ERR,
+			"malloc for receive msghdr failed");
+		return false;
+	}
+	memset(&sin6_allrouters, 0, sizeof(struct sockaddr_in6));
+	sin6_allrouters.sin6_family = AF_INET6;
+	sin6_allrouters.sin6_len = sizeof(sin6_allrouters);
+	if (inet_pton(AF_INET6, ALLROUTER,
+		      &sin6_allrouters.sin6_addr.s6_addr) != 1) {
+		log_msg(LOG_ERR, "inet_pton failed for %s",
+			ALLROUTER);
+		return false;
+	}
+	if ((rssock = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6)) < 0) {
+		log_msg(LOG_ERR, "socket: %s", strerror(errno));
+		return false;
+	}
+	/* Return receiving interface */
+	on = 1;
+	if (setsockopt(rssock, IPPROTO_IPV6, IPV6_RECVPKTINFO, &on,
+		       sizeof(on)) < 0) {
+		log_msg(LOG_ERR, "IPV6_RECVPKTINFO: %s",
+			strerror(errno));
+		return false;
+	}
+	/* Accept only router advertisements on the socket */
+	ICMP6_FILTER_SETBLOCKALL(&filt);
+	ICMP6_FILTER_SETPASS(ND_ROUTER_ADVERT, &filt);
+	if (setsockopt(rssock, IPPROTO_ICMPV6, ICMP6_FILTER, &filt,
+		       sizeof(filt)) == -1) {
+		log_msg(LOG_ERR, "setsockopt(ICMP6_FILTER): %s",
+			strerror(errno));
+		return false;
+	}
+	/* initialize msghdr for receiving packets */
+	rcviov[0].iov_base = (caddr_t) answer;
+	rcviov[0].iov_len = sizeof(answer);
+	rcvmhdr.msg_name = (caddr_t) & from;
+	rcvmhdr.msg_namelen = sizeof(from);
+	rcvmhdr.msg_iov = rcviov;
+	rcvmhdr.msg_iovlen = 1;
+	rcvmhdr.msg_control = (caddr_t) rcvcmsgbuf;
+	rcvmhdr.msg_controllen = rcvcmsglen;
+
+	socket_event = calloc(sizeof(struct change_kev), 1);
+	signal_event = calloc(sizeof(struct change_kev), 1);
+	if (socket_event && signal_event) {
+		EV_SET(&socket_event->kev, rssock, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0);
+		TAILQ_INSERT_TAIL(&changelist.events, socket_event, entries);
+		EV_SET(&signal_event->kev, SIGUSR1, EVFILT_SIGNAL, EV_ADD | EV_ENABLE, 0, 0, 0);
+		TAILQ_INSERT_TAIL(&changelist.events, signal_event, entries);
+		signal(SIGUSR1, SIG_IGN);
+		changelist.count = 2;
+		return true;
+	} else {
+		log_msg(LOG_ERR, "couldn't allocate signal and/or signal events.");
+		return false;
+	}
 }
 
 bool
@@ -164,18 +223,18 @@ changelist_add_timer_kev(struct dns_data *data, intptr_t timeout_sec)
 		log_msg(LOG_ERR, "malloc for timer change event failed");
 		ok = false;
 	} else {
-		changelist_count++;
+		changelist.count++;
 		if (timeout_sec == DELETE_TIMER) {
 			flags = EV_DELETE;
 			desc = "delete";
 		} else {
 			flags = (EV_ADD | EV_ENABLE | EV_ONESHOT);
 			desc = "add";
-			data->timer_id = ++changelist_cur_timer_id;
+			data->timer_id = ++changelist.cur_timer_id;
 		}
 		EV_SET(&change->kev, data->timer_id, EVFILT_TIMER, flags,
 		       0, (timeout_sec * 1000), data);
-		TAILQ_INSERT_TAIL(&changelist_events, change, entries);
+		TAILQ_INSERT_TAIL(&changelist.events, change, entries);
 		log_msg(LOG_DEBUG, "%s timer %lu", desc, change->kev.ident);
 	}
 
@@ -189,82 +248,24 @@ changelist_event_listen(int kq, struct kevent *event)
 	struct kevent  *changes;
 	struct change_kev *change, *change_tmp;
 
-	changes = calloc(sizeof(struct kevent), changelist_count);
+	changes = calloc(sizeof(struct kevent), changelist.count);
 	if (changes == NULL) {
 		nev = 0;
 		log_msg(LOG_ERR, "malloc for kevent array failed");
 	} else {
 		i = 0;
-		TAILQ_FOREACH_MUTABLE(change, &changelist_events, entries, change_tmp) {
+		TAILQ_FOREACH_MUTABLE(change, &changelist.events, entries, change_tmp) {
 			changes[i++] = change->kev;
-			TAILQ_REMOVE(&changelist_events, change, entries);
+			TAILQ_REMOVE(&changelist.events, change, entries);
 			free(change);
 		}
 
-		nev = kevent(kq, changes, changelist_count, event, 1, NULL);
+		nev = kevent(kq, changes, changelist.count, event, 1, NULL);
 		free(changes);
 	}
-	changelist_count = 0;
+	changelist.count = 0;
 
 	return nev;
-}
-
-int
-sockopen(void)
-{
-	int		on;
-	struct icmp6_filter filt;
-	int		rcvcmsglen;
-	static u_char  *rcvcmsgbuf = NULL;
-
-	rcvcmsglen = CMSG_SPACE(sizeof(struct in6_pktinfo)) +
-		CMSG_SPACE(sizeof(int));
-	if (rcvcmsgbuf == NULL && (rcvcmsgbuf = malloc(rcvcmsglen)) == NULL) {
-		log_msg(LOG_ERR,
-			"malloc for receive msghdr failed");
-		return (-1);
-	}
-	memset(&sin6_allrouters, 0, sizeof(struct sockaddr_in6));
-	sin6_allrouters.sin6_family = AF_INET6;
-	sin6_allrouters.sin6_len = sizeof(sin6_allrouters);
-	if (inet_pton(AF_INET6, ALLROUTER,
-		      &sin6_allrouters.sin6_addr.s6_addr) != 1) {
-		log_msg(LOG_ERR, "inet_pton failed for %s",
-			ALLROUTER);
-		return (-1);
-	}
-	if ((rssock = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6)) < 0) {
-		log_msg(LOG_ERR, "socket: %s", strerror(errno));
-		return (-1);
-	}
-	/* Return receiving interface */
-	on = 1;
-	if (setsockopt(rssock, IPPROTO_IPV6, IPV6_RECVPKTINFO, &on,
-		       sizeof(on)) < 0) {
-		log_msg(LOG_ERR, "IPV6_RECVPKTINFO: %s",
-			strerror(errno));
-		exit(1);
-	}
-	/* Accept only router advertisements on the socket */
-	ICMP6_FILTER_SETBLOCKALL(&filt);
-	ICMP6_FILTER_SETPASS(ND_ROUTER_ADVERT, &filt);
-	if (setsockopt(rssock, IPPROTO_ICMPV6, ICMP6_FILTER, &filt,
-		       sizeof(filt)) == -1) {
-		log_msg(LOG_ERR, "setsockopt(ICMP6_FILTER): %s",
-			strerror(errno));
-		return (-1);
-	}
-	/* initialize msghdr for receiving packets */
-	rcviov[0].iov_base = (caddr_t) answer;
-	rcviov[0].iov_len = sizeof(answer);
-	rcvmhdr.msg_name = (caddr_t) & from;
-	rcvmhdr.msg_namelen = sizeof(from);
-	rcvmhdr.msg_iov = rcviov;
-	rcvmhdr.msg_iovlen = 1;
-	rcvmhdr.msg_control = (caddr_t) rcvcmsgbuf;
-	rcvmhdr.msg_controllen = rcvcmsglen;
-
-	return (rssock);
 }
 
 void
@@ -591,7 +592,7 @@ sock_input(void)
 		if_indextoname(pi->ipi6_ifindex, ifname);
 
 
-	if (changelist_count > 0)
+	if (changelist.count > 0)
 		write_resolv_conf(ifname);
 }
 
@@ -656,11 +657,11 @@ int
 main(int argc, char *argv[])
 {
 	struct kevent	event;
-	int		ch        , kq, s, nev;
+	int		ch        , kq, nev;
 	const char     *opts;
 	FILE           *pid;
 
-	opts = "dfh";
+	opts = "df";
 
 	while ((ch = getopt(argc, argv, opts)) != -1) {
 		switch (ch) {
@@ -698,7 +699,6 @@ main(int argc, char *argv[])
 		if (log_upto >= 0)
 			setlogmask(LOG_UPTO(log_upto));
 	}
-	signal(SIGUSR1, SIG_IGN);
 
 	if (!fflag)
 		daemon(0, 0);
@@ -707,7 +707,7 @@ main(int argc, char *argv[])
 		log_msg(LOG_ERR, "kqueue(): %s", strerror(errno));
 		exit(EXIT_FAILURE);
 	}
-	if ((s = sockopen()) < 0)
+	if (changelist_add_socket_and_signal() == false)
 		exit(EXIT_FAILURE);
 
 	pid = fopen(PID_FILE, "w");
@@ -720,9 +720,6 @@ main(int argc, char *argv[])
 	}
 
 	log_msg(LOG_NOTICE, "started");
-
-	changelist_init(s);
-
 	for (;;) {
 		nev = changelist_event_listen(kq, &event);
 		if (nev < 0) {
