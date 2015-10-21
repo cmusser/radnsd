@@ -47,23 +47,13 @@ struct dns_data {
 };
 
 TAILQ_HEAD(radns_list, dns_data);
-struct radns_list rdnss_cur = TAILQ_HEAD_INITIALIZER(rdnss_cur);
-struct radns_list rdnss_new = TAILQ_HEAD_INITIALIZER(rdnss_new);
-struct radns_list dnssl_cur = TAILQ_HEAD_INITIALIZER(dnssl_cur);
-struct radns_list dnssl_new = TAILQ_HEAD_INITIALIZER(dnssl_new);
 
 struct change_kev {
 	struct kevent	kev;
 			TAILQ_ENTRY   (change_kev) entries;
 };
 
-TAILQ_HEAD(change_kev_list_t, change_kev);
-
-struct event_changelist {
-	int		count;
-	uint32_t	cur_timer_id;
-	struct change_kev_list_t events;
-};
+TAILQ_HEAD(change_kev_list, change_kev);
 
 #define ALLROUTER "ff02::2"
 static struct sockaddr_in6 sin6_allrouters = {
@@ -79,7 +69,13 @@ static struct sockaddr_in6 sin6_allrouters = {
 #define ADDRCOUNT(rdnss_p) ((rdnss_p->nd_opt_rdnss_len - 1) / 2)
 #define DELETE_TIMER 0
 
-struct event_changelist changelist;
+struct radns_list rdnss_cur = TAILQ_HEAD_INITIALIZER(rdnss_cur);
+struct radns_list rdnss_new = TAILQ_HEAD_INITIALIZER(rdnss_new);
+struct radns_list dnssl_cur = TAILQ_HEAD_INITIALIZER(dnssl_cur);
+struct radns_list dnssl_new = TAILQ_HEAD_INITIALIZER(dnssl_new);
+int		changelist_count;
+uint32_t	changelist_cur_timer_id;
+struct change_kev_list changelist_events;
 int		log_upto = LOG_NOTICE;
 bool		fflag = false;
 bool		dflag = false;
@@ -92,9 +88,9 @@ char		ifname    [IFNAMSIZ];
 
 void		usage     (void);
 void		log_msg   (int priority, const char *msg,...);
-void		changelist_init(struct event_changelist *list, int s);
-bool		changelist_set_timer(struct event_changelist *list, struct dns_data *data, intptr_t timeout_sec);
-int		changelist_event_listen(int kq, struct event_changelist *list, struct kevent *event);
+void		changelist_init(int s);
+bool		changelist_set_timer(struct dns_data *data, intptr_t timeout_sec);
+int		changelist_event_listen(int kq, struct kevent *event);
 int		sockopen   (void);
 void		format_timestamp(char *time_str, size_t bufsz, time_t time);
 time_t		get_expiry(time_t ltime);
@@ -135,23 +131,23 @@ log_msg(int priority, const char *msg,...)
 }
 
 void
-changelist_init(struct event_changelist *list, int s)
+changelist_init(int s)
 {
 	struct change_kev *change;
 
-	list->cur_timer_id = 0;
-	TAILQ_INIT(&list->events);
-	list->count = 2;
+	changelist_cur_timer_id = 0;
+	TAILQ_INIT(&changelist_events);
+	changelist_count = 2;
 	change = calloc(sizeof(struct change_kev), 1);
 	EV_SET(&change->kev, s, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0);
-	TAILQ_INSERT_TAIL(&list->events, change, entries);
+	TAILQ_INSERT_TAIL(&changelist_events, change, entries);
 	change = calloc(sizeof(struct change_kev), 1);
 	EV_SET(&change->kev, SIGUSR1, EVFILT_SIGNAL, EV_ADD | EV_ENABLE, 0, 0, 0);
-	TAILQ_INSERT_TAIL(&list->events, change, entries);
+	TAILQ_INSERT_TAIL(&changelist_events, change, entries);
 }
 
 bool
-changelist_set_timer(struct event_changelist *list, struct dns_data *data, intptr_t timeout_sec)
+changelist_set_timer(struct dns_data *data, intptr_t timeout_sec)
 {
 	bool		rv = true;
 	struct change_kev *change;
@@ -163,7 +159,7 @@ changelist_set_timer(struct event_changelist *list, struct dns_data *data, intpt
 		log_msg(LOG_ERR, "malloc for timer change event failed");
 		rv = false;
 	} else {
-		list->count++;
+		changelist_count++;
 		if (timeout_sec == DELETE_TIMER) {
 			flags = EV_DELETE;
 			desc = "delete";
@@ -173,7 +169,7 @@ changelist_set_timer(struct event_changelist *list, struct dns_data *data, intpt
 		}
 		EV_SET(&change->kev, data->timer_id, EVFILT_TIMER, flags,
 		       0, (timeout_sec * 1000), data);
-		TAILQ_INSERT_TAIL(&list->events, change, entries);
+		TAILQ_INSERT_TAIL(&changelist_events, change, entries);
 		log_msg(LOG_DEBUG, "%s timer %lu for %s", desc, change->kev.ident,
 			data->str);
 	}
@@ -182,28 +178,28 @@ changelist_set_timer(struct event_changelist *list, struct dns_data *data, intpt
 }
 
 int
-changelist_event_listen(int kq, struct event_changelist *list, struct kevent *event)
+changelist_event_listen(int kq, struct kevent *event)
 {
 	int		nev       , i;
 	struct kevent  *changes;
 	struct change_kev *change, *change_tmp;
 
-	changes = calloc(sizeof(struct kevent), list->count);
+	changes = calloc(sizeof(struct kevent), changelist_count);
 	if (changes == NULL) {
 		nev = 0;
 		log_msg(LOG_ERR, "malloc for kevent array failed");
 	} else {
 		i = 0;
-		TAILQ_FOREACH_MUTABLE(change, &list->events, entries, change_tmp) {
+		TAILQ_FOREACH_MUTABLE(change, &changelist_events, entries, change_tmp) {
 			changes[i++] = change->kev;
-			TAILQ_REMOVE(&list->events, change, entries);
+			TAILQ_REMOVE(&changelist_events, change, entries);
 			free(change);
 		}
 
-		nev = kevent(kq, changes, list->count, event, 1, NULL);
+		nev = kevent(kq, changes, changelist_count, event, 1, NULL);
 		free(changes);
 	}
-	list->count = 0;
+	changelist_count = 0;
 
 	return nev;
 }
@@ -371,24 +367,24 @@ handle_dns_data(u_int8_t type, char *str, uintptr_t ltime)
 			data = malloc(sizeof(struct dns_data));
 			if (data != NULL) {
 				data->type = type;
-				data->timer_id = ++changelist.cur_timer_id;
+				data->timer_id = ++changelist_cur_timer_id;
 				strlcpy(data->str, str, sizeof(data->str));
 				data->expiry = get_expiry(ltime);
 				TAILQ_INSERT_TAIL(list_new, data, entries);
-				changelist_set_timer(&changelist, data, ltime);
+				changelist_set_timer(data, ltime);
 			} else {
 				log_msg(LOG_ERR, "failed to allocate storage for \"%s\"", str);
 			}
 		}
 	} else {		/* Updated data */
-		changelist_set_timer(&changelist, data, DELETE_TIMER);
+		changelist_set_timer(data, DELETE_TIMER);
 		if (ltime == 0) {
 			TAILQ_REMOVE(list, data, entries);
 			free(data);
 		} else {
-			data->timer_id = ++changelist.cur_timer_id;
+			data->timer_id = ++changelist_cur_timer_id;
 			data->expiry = get_expiry(ltime);
-			changelist_set_timer(&changelist, data, ltime);
+			changelist_set_timer(data, ltime);
 		}
 	}
 }
@@ -425,7 +421,7 @@ prepend_new_dns_data(u_int8_t type)
 		}
 		if (count == max) {
 			log_msg(LOG_INFO, "evicting %s", expires_first->str);
-			changelist_set_timer(&changelist, expires_first, DELETE_TIMER);
+			changelist_set_timer(expires_first, DELETE_TIMER);
 			TAILQ_REMOVE(list, expires_first, entries);
 			free(expires_first);
 		}
@@ -607,7 +603,7 @@ sock_input(void)
 		if_indextoname(pi->ipi6_ifindex, ifname);
 
 
-	if (changelist.count > 0)
+	if (changelist_count > 0)
 		write_resolv_conf(ifname);
 }
 
@@ -729,9 +725,9 @@ main(int argc, char *argv[])
 
 	log_msg(LOG_NOTICE, "started%s", dflag ? " (debug output)" : "");
 
-	changelist_init(&changelist, s);
+	changelist_init(s);
 	for (;;) {
-		nev = changelist_event_listen(kq, &changelist, &event);
+		nev = changelist_event_listen(kq, &event);
 		if (nev < 0) {
 			log_msg(LOG_ERR, "kevent: %s", strerror(errno));
 			exit(EXIT_FAILURE);
