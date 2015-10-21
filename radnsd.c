@@ -76,9 +76,9 @@ struct radns_list dnssl_new = TAILQ_HEAD_INITIALIZER(dnssl_new);
 int		changelist_count;
 uint32_t	changelist_cur_timer_id;
 struct change_kev_list changelist_events;
-int		log_upto = LOG_NOTICE;
+int		log_upto;
 bool		fflag = false;
-bool		dflag = false;
+int		dflag = 0;
 int		rssock;
 struct msghdr	rcvmhdr;
 u_char		answer  [1500];
@@ -166,12 +166,12 @@ changelist_add_timer_kev(struct dns_data *data, intptr_t timeout_sec)
 		} else {
 			flags = (EV_ADD | EV_ENABLE | EV_ONESHOT);
 			desc = "add";
+			data->timer_id = ++changelist_cur_timer_id;
 		}
 		EV_SET(&change->kev, data->timer_id, EVFILT_TIMER, flags,
 		       0, (timeout_sec * 1000), data);
 		TAILQ_INSERT_TAIL(&changelist_events, change, entries);
-		log_msg(LOG_DEBUG, "%s timer %lu for %s", desc, change->kev.ident,
-			data->str);
+		log_msg(LOG_DEBUG, "%s timer %lu", desc, change->kev.ident);
 	}
 
 	return ok;
@@ -366,12 +366,12 @@ handle_dns_data(u_int8_t type, char *str, uintptr_t ltime)
 		if (ltime != 0) {
 			data = malloc(sizeof(struct dns_data));
 			if (data != NULL) {
-				data->type = type;
-				data->timer_id = ++changelist_cur_timer_id;
-				strlcpy(data->str, str, sizeof(data->str));
-				data->expiry = get_expiry(ltime);
-				if (changelist_add_timer_kev(data, ltime))
+				if (changelist_add_timer_kev(data, ltime)) {
+					data->type = type;
+					strlcpy(data->str, str, sizeof(data->str));
+					data->expiry = get_expiry(ltime);
 					TAILQ_INSERT_TAIL(list_new, data, entries);
+				}
 			} else {
 				log_msg(LOG_ERR, "failed to allocate storage for \"%s\"", str);
 			}
@@ -381,11 +381,8 @@ handle_dns_data(u_int8_t type, char *str, uintptr_t ltime)
 			if (ltime == 0) {
 				TAILQ_REMOVE(list, data, entries);
 				free(data);
-			} else {
-				data->timer_id = ++changelist_cur_timer_id;
+			} else if (changelist_add_timer_kev(data, ltime))
 				data->expiry = get_expiry(ltime);
-				changelist_add_timer_kev(data, ltime);
-			}
 		}
 	}
 }
@@ -683,10 +680,10 @@ main(int argc, char *argv[])
 	while ((ch = getopt(argc, argv, opts)) != -1) {
 		switch (ch) {
 		case 'd':
-			dflag = 1;
+			dflag++;
 			break;
 		case 'f':
-			fflag = 1;
+			fflag = true;
 			break;
 		default:
 			usage();
@@ -694,9 +691,17 @@ main(int argc, char *argv[])
 		}
 	}
 
-	/* set log level */
-	if (dflag == 1)
+	switch (dflag) {
+	case 0:
+		log_upto = LOG_NOTICE;
+		break;
+	case 1:
 		log_upto = LOG_INFO;
+		break;
+	default:
+		log_upto = LOG_DEBUG;
+	}
+
 	if (!fflag) {
 		char           *ident;
 		ident = strrchr(argv[0], '/');
@@ -729,7 +734,7 @@ main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	log_msg(LOG_NOTICE, "started%s", dflag ? " (debug output)" : "");
+	log_msg(LOG_NOTICE, "started");
 
 	changelist_init(s);
 	for (;;) {
