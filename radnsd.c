@@ -52,7 +52,7 @@ struct radns_list {
 	uint8_t		type;
 	struct dns_data_list list;
 	int		max;
-	struct dns_data		*last;
+	struct dns_data *last;
 };
 
 struct change_kev {
@@ -76,8 +76,8 @@ static struct sockaddr_in6 sin6_allrouters = {
 #define ADDRCOUNT(rdnss_p) ((rdnss_p->nd_opt_rdnss_len - 1) / 2)
 #define DELETE_TIMER 0
 
-struct radns_list servers;
-struct radns_list search_domains;
+struct radns_list servers = {ND_OPT_RDNSS, TAILQ_HEAD_INITIALIZER(servers.list), MAXNS, NULL};
+struct radns_list search_domains = {ND_OPT_DNSSL, TAILQ_HEAD_INITIALIZER(search_domains.list), MAXDNSRCH, NULL};
 int		changelist_count;
 uint32_t	changelist_cur_timer_id;
 struct change_kev_list changelist_events;
@@ -391,7 +391,6 @@ handle_dns_data(struct radns_list *radns, char *str, uintptr_t ltime)
 							free(expires_first);
 						}
 					}
-
 					data->type = radns->type;
 					strlcpy(data->str, str, sizeof(data->str));
 					data->expiry = get_expiry(ltime);
@@ -503,7 +502,7 @@ process_dnssl_opt(struct nd_router_advert *ra, struct nd_opt_hdr *opt)
 			}
 		} else {
 			log_msg(LOG_ERR, "exceeded max size for label (%d) "
-			    "or domain (%d)", LABEL_MAX, DOMAIN_MAX);
+				"or domain (%d)", LABEL_MAX, DOMAIN_MAX);
 		}
 		do {
 			cur_in++;
@@ -723,16 +722,6 @@ main(int argc, char *argv[])
 	log_msg(LOG_NOTICE, "started");
 
 	changelist_init(s);
-
-	servers.type = ND_OPT_RDNSS;
-	TAILQ_INIT(&servers.list);
-	servers.max = MAXNS;
-	servers.last = NULL;
-
-	search_domains.type = ND_OPT_DNSSL;
-	TAILQ_INIT(&search_domains.list);
-	search_domains.max = MAXDNSRCH;
-	search_domains.last = NULL;
 
 	for (;;) {
 		nev = changelist_event_listen(kq, &event);
