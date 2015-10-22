@@ -37,8 +37,7 @@
 #define RESOLVCONF_FILE "/etc/resolv.conf"
 
 struct dns_data {
-
-	u_int8_t	type;	/* List to which this element belongs */
+	uint8_t		type;	/* List to which this element belongs */
 	uintptr_t	timer_id;	/* Replaced when update arrives */
 	char		str       [DNS_STR_MAX];	/* domain name or server
 							 * address */
@@ -104,8 +103,8 @@ void		format_timestamp(char *time_str, size_t bufsz, time_t time);
 time_t		get_expiry(time_t ltime);
 time_t		get_ltime(struct nd_router_advert *ra, struct nd_opt_hdr *opt);
 void		handle_dns_data(struct radns_list *radns, char *str, uintptr_t ltime);
-void		prepend_new_dns_data(u_int8_t type);
-bool		validate_label(u_int8_t * label, u_int8_t len);
+void		prepend_new_dns_data(uint8_t type);
+bool		validate_label(uint8_t * label, uint8_t len);
 void		process_rdnss_opt(struct nd_router_advert *ra, struct nd_opt_hdr *opt);
 void		process_dnssl_opt(struct nd_router_advert *ra, struct nd_opt_hdr *opt);
 void		sock_input(void);
@@ -205,7 +204,7 @@ changelist_add_socket_and_signal()
 		changelist.count = 2;
 		return true;
 	} else {
-		log_msg(LOG_ERR, "couldn't allocate signal and/or signal events.");
+		log_msg(LOG_ERR, "couldn't allocate socket and/or signal events.");
 		return false;
 	}
 }
@@ -322,7 +321,7 @@ get_ltime(struct nd_router_advert *ra, struct nd_opt_hdr *opt)
 {
 	char           *desc;
 	intptr_t	ltime , expiry;
-	u_int16_t	ra_ltime;
+	uint16_t	ra_ltime;
 	char		expiry_str[DATE_MAX];
 
 	if (opt->nd_opt_type == ND_OPT_RDNSS) {
@@ -418,9 +417,9 @@ handle_dns_data(struct radns_list *radns, char *str, uintptr_t ltime)
 }
 
 bool
-validate_label(u_int8_t * label, u_int8_t len)
+validate_label(uint8_t * label, uint8_t len)
 {
-	u_int8_t       *end;
+	uint8_t        *end;
 
 	if (!isalpha(*label)) {
 		log_msg(LOG_ERR, "first char in label (\"%c\") not a letter", *label);
@@ -449,7 +448,7 @@ process_rdnss_opt(struct nd_router_advert *ra, struct nd_opt_hdr *opt)
 
 	intptr_t	ltime;
 	struct nd_opt_rdnss *rdnss;
-	u_int8_t	i;
+	uint8_t		i;
 	struct in6_addr *cur_addr_p;
 	char		v6addr    [INET6_ADDRSTRLEN];
 
@@ -469,15 +468,15 @@ process_dnssl_opt(struct nd_router_advert *ra, struct nd_opt_hdr *opt)
 {
 	intptr_t	ltime;
 	struct nd_opt_dnssl *dnssl;
-	u_int8_t       *cur_in, *in_buf_end;
+	uint8_t        *cur_in, *in_buf_end;
 	char		domain    [DOMAIN_MAX] = {'\0'};
 	char           *cur_out, *domain_end;
 
 	ltime = get_ltime(ra, opt);
 
 	dnssl = (struct nd_opt_dnssl *)opt;
-	cur_in = (u_int8_t *) (dnssl + 1);
-	in_buf_end = (u_int8_t *) (dnssl + (dnssl->nd_opt_dnssl_len * 8));
+	cur_in = (uint8_t *) (dnssl + 1);
+	in_buf_end = (uint8_t *) (dnssl + (dnssl->nd_opt_dnssl_len * 8));
 	cur_out = domain;
 	domain_end = domain + sizeof(domain) - 1;
 
@@ -524,7 +523,7 @@ sock_input(void)
 	int		ifindex = 0;
 	struct cmsghdr *cm;
 	struct in6_pktinfo *pi = NULL;
-	u_int8_t	opt_len;
+	uint8_t		opt_len;
 
 	if ((i = recvmsg(rssock, &rcvmhdr, 0)) < 0) {
 		log_msg(LOG_ERR, "recvmsg: %s", strerror(errno));
@@ -699,7 +698,6 @@ main(int argc, char *argv[])
 		if (log_upto >= 0)
 			setlogmask(LOG_UPTO(log_upto));
 	}
-
 	if (!fflag)
 		daemon(0, 0);
 
