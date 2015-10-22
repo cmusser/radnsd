@@ -94,7 +94,6 @@ struct iovec	rcviov[1];
 static struct sockaddr_in6 from;
 char		ifname    [IFNAMSIZ];
 
-void		usage     (void);
 void		log_msg   (int priority, const char *msg,...);
 bool		changelist_add_socket_and_signal();
 bool		changelist_add_timer_kev(struct dns_data *data, intptr_t timeout_sec);
@@ -110,15 +109,7 @@ void		process_dnssl_opt(struct nd_router_advert *ra, struct nd_opt_hdr *opt);
 void		sock_input(void);
 void		write_resolv_conf(char *ifname);
 void		expire_timer(struct kevent *kev);
-size_t		get_max_width(struct radns_list *list, size_t max);
 void		dump_state(void);
-
-void
-usage(void)
-{
-	fprintf(stderr, "usage: radnsd [-fd]\n");
-	exit(EXIT_FAILURE);
-}
 
 void
 log_msg(int priority, const char *msg,...)
@@ -613,32 +604,24 @@ expire_timer(struct kevent *kev)
 	write_resolv_conf(ifname);
 }
 
-size_t
-get_max_width(struct radns_list *radns, size_t max)
-{
-	size_t		cur;
-	struct dns_data *data;
-
-	TAILQ_FOREACH(data, &radns->list, entries) {
-		cur = strlen(data->str);
-		if (cur > max)
-			max = cur;
-	}
-
-	return max;
-}
-
 void
 dump_state(void)
 {
-	size_t		max;
+	size_t		cur    , max = 0;
 	struct dns_data *data;
 	char		fmt       [64];
 	char		expiry_str[DATE_MAX];
 
-	max = get_max_width(&servers, 0);
-	max = get_max_width(&search_domains, max);
+	TAILQ_FOREACH(data, &servers.list, entries) {
+		if ((cur = strlen(data->str)) > max)
+			max = cur;
+	}
+	TAILQ_FOREACH(data, &search_domains.list, entries) {
+		if ((cur = strlen(data->str)) > max)
+			max = cur;
+	}
 	snprintf(fmt, sizeof(fmt), "  %%-%lus  %%s (timer %%lu)", max);
+
 	log_msg(LOG_NOTICE, "servers:");
 	TAILQ_FOREACH(data, &servers.list, entries) {
 		format_timestamp(expiry_str, sizeof(expiry_str), data->expiry);
@@ -671,8 +654,8 @@ main(int argc, char *argv[])
 			fflag = true;
 			break;
 		default:
-			usage();
-			/* NOTREACHED */
+			fprintf(stderr, "usage: radnsd [-fd]\n");
+			exit(EXIT_FAILURE);
 		}
 	}
 
