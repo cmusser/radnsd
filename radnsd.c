@@ -449,8 +449,10 @@ process_rdnss_opt(struct nd_router_advert *ra, struct nd_opt_hdr *opt)
 	for (cur_addr_p = (struct in6_addr *)(rdnss + 1), i = 0;
 	     i < ADDRCOUNT(rdnss);
 	     i++, cur_addr_p++) {
-		inet_ntop(AF_INET6, cur_addr_p, v6addr, sizeof(v6addr));
-		handle_dns_data(&servers, v6addr, ltime);
+		if (inet_ntop(AF_INET6, cur_addr_p, v6addr, sizeof(v6addr)) != NULL)
+			handle_dns_data(&servers, v6addr, ltime);
+		else
+			log_msg(LOG_ERR, "inet_ntop failed: %s", strerror(errno));
 	}
 }
 
