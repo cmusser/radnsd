@@ -42,7 +42,7 @@ struct dns_data {
 	char		str       [DNS_STR_MAX];	/* domain name or server
 							 * address */
 	time_t		expiry;
-			TAILQ_ENTRY   (dns_data) entries;
+	TAILQ_ENTRY   (dns_data) entries;
 };
 
 TAILQ_HEAD(dns_data_list, dns_data);
@@ -56,7 +56,7 @@ struct radns_list {
 
 struct change_kev {
 	struct kevent	kev;
-			TAILQ_ENTRY   (change_kev) entries;
+	TAILQ_ENTRY   (change_kev) entries;
 };
 
 TAILQ_HEAD(change_kev_list, change_kev);
