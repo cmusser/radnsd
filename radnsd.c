@@ -1,13 +1,13 @@
-#include <sys/event.h>
 #include <sys/queue.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/event.h>
 
 #include <arpa/inet.h>
 #include <net/if.h>
-#include <netinet/icmp6.h>
 #include <netinet/in.h>
+#include <netinet/icmp6.h>
 
 #include <ctype.h>
 #include <errno.h>
@@ -244,7 +244,11 @@ changelist_event_listen(int kq, struct kevent *event)
 		log_msg(LOG_ERR, "malloc for kevent array failed");
 	} else {
 		i = 0;
+#ifdef __DragonFly__
 		TAILQ_FOREACH_MUTABLE(change, &changelist.events, entries, change_tmp) {
+#else
+		TAILQ_FOREACH_SAFE(change, &changelist.events, entries, change_tmp) {
+#endif
 			changes[i++] = change->kev;
 			TAILQ_REMOVE(&changelist.events, change, entries);
 			free(change);
