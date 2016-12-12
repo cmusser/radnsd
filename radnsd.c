@@ -87,6 +87,7 @@ struct event_changelist changelist = {0, 0, TAILQ_HEAD_INITIALIZER(changelist.ev
 int		log_upto;
 bool		fflag = false;
 int		dflag = 0;
+bool		wflag = false;
 int		rssock;
 struct msghdr	rcvmhdr;
 u_char		answer  [1500];
@@ -265,12 +266,32 @@ changelist_event_listen(int kq, struct kevent *event)
 void
 write_resolv_conf(char *ifname)
 {
-	FILE           *resolv_conf;
+	FILE           *resolv_conf = NULL;
+	char		resolv_data_filename[512] = {'\0'};
+	int		resolv_data_fd;
 	struct dns_data *cur;
 	bool		has_dnssl = false;
 	char		dnssl     [DNS_STR_MAX] = {'\0'};
+	char		resolvconf_cmd[512];
+	FILE           *cmd_fd;
+	char		cmd_out   [256];
+	char           *newline;
 
-	resolv_conf = fopen(RESOLVCONF_FILE, "w");
+	if (wflag == false) {
+		snprintf(resolv_data_filename, sizeof(resolv_data_filename),
+		    "/tmp/radnsd_resolv_%s.XXXXXX", ifname);
+		resolv_data_fd = mkstemp(resolv_data_filename);
+		if (resolv_data_fd == -1) {
+			log_msg(LOG_ERR, "creating of resolvconf temp data failed -- %s",
+			    strerror(errno));
+		} else {
+			resolv_conf = fdopen(resolv_data_fd, "w");
+		}
+	} else {
+		strlcpy(resolv_data_filename, RESOLVCONF_FILE, sizeof(resolv_data_filename));
+		resolv_conf = fopen(resolv_data_filename, "w");
+	}
+
 	if (resolv_conf != NULL) {
 		fprintf(resolv_conf, "# from %s (RA)\n", ifname);
 		TAILQ_FOREACH(cur, &search_domains.list, entries) {
@@ -287,8 +308,31 @@ write_resolv_conf(char *ifname)
 			fprintf(resolv_conf, "nameserver %s\n", cur->str);
 
 		fclose(resolv_conf);
+
+		if (wflag == false) {
+			snprintf(resolvconf_cmd, sizeof(resolvconf_cmd), "%s -a %s < %s 2>&1",
+			    "/sbin/resolvconf", ifname, resolv_data_filename);
+
+			if ((cmd_fd = popen(resolvconf_cmd, "r")) == NULL) {
+				log_msg(LOG_ERR, "spawn of \"%s\" failed: %s", resolvconf_cmd,
+				    strerror(errno));
+			} else {
+				while (fgets(cmd_out, sizeof(cmd_out), cmd_fd) != NULL) {
+					newline = strrchr(cmd_out, '\n');
+					if (newline)
+						*newline = '\0';
+					log_msg(LOG_NOTICE, "==> %s", cmd_out);
+				}
+
+				if (ferror(cmd_fd))
+					log_msg(LOG_ERR, "reading subprocess output: %s", strerror(errno));
+
+				pclose(cmd_fd);
+			}
+			unlink(resolv_data_filename);
+		}
 	} else {
-		log_msg(LOG_ERR, "fopen() for %s failed %s", RESOLVCONF_FILE,
+		log_msg(LOG_ERR, "fopen() for %s failed %s", resolv_data_filename,
 			strerror(errno));
 	}
 }
@@ -649,7 +693,7 @@ main(int argc, char *argv[])
 	const char     *opts;
 	FILE           *pid;
 
-	opts = "df";
+	opts = "dfw";
 
 	while ((ch = getopt(argc, argv, opts)) != -1) {
 		switch (ch) {
@@ -659,8 +703,11 @@ main(int argc, char *argv[])
 		case 'f':
 			fflag = true;
 			break;
+		case 'w':
+			wflag = true;
+			break;
 		default:
-			fprintf(stderr, "usage: radnsd [-fd]\n");
+			fprintf(stderr, "usage: radnsd [-fdw]\n");
 			exit(EXIT_FAILURE);
 		}
 	}
