@@ -8,7 +8,6 @@ radnsd: radnsd.c
 
 install: radnsd
 	cp radnsd ${DESTDIR}/${PREFIX}/sbin/
-	cp radnsd.rc ${DESTDIR}/${PREFIX}/etc/rc.d/radnsd
 	cp radnsd.8 ${DESTDIR}/${PREFIX}/man/man8/radnsd.8
 
 clean:
