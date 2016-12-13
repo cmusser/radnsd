@@ -8,14 +8,14 @@
 .\"
 .Sh SYNOPSIS
 .Nm
-.Op df
+.Op Fl dfw
+
 .\"
 .Sh DESCRIPTION
 .Nm
 is a daemon that extracts DNS configuration from IPv6 router
-advertisments and writes that information to
-.Pa /etc/resolv.conf.
-The daemon aims to conform to RFC6106.
+advertisments and configures the system's resolver. It aims to
+conform to RFC6106.
 .Nm
 is useful for clients on an IPv6 network that does not provide DHCPv6
 service, but does have routers configured to provide DNS resolver and
@@ -34,6 +34,18 @@ from becoming a daemon (foreground mode).
 Warning messages are generated to standard error
 instead of
 .Xr syslog 3 .
+.It Fl w
+Write directly to
+.Pa /etc/resolv.conf.
+This is useful if the
+.Xr resolvconf 8
+utility is  not available, but is likely to conflict with other programs
+that write to this file, such as
+.Xr dhclient 8
+By default,
+.Xr resolvconf 8
+is called to manage the resolver configuration.
+
 .El
 .Sh SEE ALSO
 .Xr rtadvd 8
@@ -41,11 +53,3 @@ instead of
 .Em RFC 6106
 - IPv6 Router Advertisement Options for DNS Configuration
 .\"
-.Sh BUGS
-.Nm
-writes to directly to
-.Pa /etc/resolv.conf
-making it incompatible with other programs that do so, such as
-.Nm dhclient
-or
-.Nm dhcpcd
